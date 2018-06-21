@@ -16,6 +16,8 @@ import sys
 import inpaint as inpaint
 import atmopt.rfm_tools as rfm
 import matplotlib.cm as cm
+user = 'pelletier'
+
 
 class Environment():
     '''
@@ -147,11 +149,12 @@ class Observation():
         self.header = self.planes[0][0].header 
         
         #The NIRSPEC headers have a couple of illegally formatted keywords
-        del self.header['GAIN.SPE']
-        del self.header['FREQ.SPE']
-        
-        if (tname is not None):
-            self.header['OBJECT'] = tname.replace(' ','')
+        print self.header['FILENAME']          # Added by Bjorn and Stefan
+        try:
+            del self.header['GAIN.SPE']
+            del self.header['FREQ.SPE']
+        except:
+            print 'Skip deleting header info:', self.header['FILENAME']
 
     def getExpPars(self):
         coadds   = self.getKeyword('COADDS')[0]
@@ -164,7 +167,9 @@ class Observation():
     def getSetting(self):
         echelle   = self.getKeyword('ECHLPOS')
         crossdisp = self.getKeyword('DISPPOS')
-
+# commented out 25 jan 16 by dp bc server crash at flat=399 for 1 dec 2015 data and motors not reintialized, header not written correctly
+#        for ii, (e, c,) in enumerate(zip(echelle, crossdisp)) : 
+#           print ii, e, c
         assert len([e for e in echelle if e==echelle[0]])==len(echelle), \
             'All exposures must be taken with the same setting!'
         assert len([c for c in crossdisp if c==crossdisp[0]])==len(crossdisp), \
@@ -267,7 +272,7 @@ class Observation():
         hdu = pf.PrimaryHDU(self.image.data)
         uhdu = pf.ImageHDU(self.uimage.data)
         hdulist = pf.HDUList([hdu,uhdu])
-        hdulist.writeto(filename,clobber=True)
+        hdulist.writeto(filename,overwrite=True)
 
     def getKeyword(self,keyword):
         try:
@@ -298,6 +303,13 @@ class Flat(Observation):
         self.image[np.where(self.image<0.1)] = 1
         if save:
             self.writeImage()
+        plt.figure()
+        plt.imshow(self.image)
+        #plt.close()        
+        plt.title('Flats')
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/flats.pdf')
+        plt.close()
         
     def _normalize(self,norm_thres):
         flux = np.median(self.image[np.where(self.image>norm_thres)])
@@ -320,7 +332,14 @@ class Dark(Observation):
         self._badPixMap()
         if save:
             self.writeImage()
-            
+        plt.figure()
+        plt.imshow(self.image)
+        #plt.close()	       
+        plt.title('Darks')
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/darks.pdf')
+        plt.close()
+        
     def _badPixMap(self,clip=30,filename='badpix.dmp'):
         median = np.median(self.image)
         var  = tvar(self.image,(-100,100))
@@ -443,7 +462,6 @@ class Nod(Observation):
             else:
                 AorB.append('B')
 
-        #NRC-EDIT
         print ''
         print '%7s %12s %12s %5s' % ('Exp.', 'RA', 'DEC', 'AorB')
         print '%7s %12s %12s %5s' % (str('-'*7), str('-'*12), str('-'*12), str('-'*5))    
@@ -507,8 +525,7 @@ class Nod(Observation):
             for i in range(0,len(RAs)):
                 print  '%7i %12f %12f %5s' % (FileNums[i], RAs[i], DECs[i], AorB[i])
             print '\n'
-        #####
-
+        
         ii = 0
         pairs = []
         while ii<nexp:
@@ -541,6 +558,11 @@ class Order():
         
         #COMBINE IMAGES FOR SOURCE EXTRACTION
         self.stack  = Nod.TargetStack[self.yrange[0]:self.yrange[1],:,:]
+#        print np.shape(self.stack)
+#        for ind,val in enumerate(self.stack[0,0,:]) : 
+#            plt.figure()
+#            plt.imshow(self.stack[:,:,ind])
+#            plt.savefig('/home/dpiskorz/Desktop/KBandData/decstack'+str(ind)+'.pdf')
         self.ustack = Nod.UTargetStack[self.yrange[0]:self.yrange[1],:,:]
         nexp = len(self.stack[0,0,:])
 
@@ -552,7 +574,14 @@ class Order():
 
         self.image1, self.uimage1 = self._collapseOrder(stack=self.stack1, ustack=self.ustack1)
         self.image2, self.uimage2 = self._collapseOrder(stack=self.stack2, ustack=self.ustack2)
-
+        plt.figure()
+        plt.imshow(self.image1)
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/spec1.pdf')
+        plt.close()
+        plt.figure()
+        plt.imshow(self.image2)
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/spec2')
+        plt.close()
         if trace is None:
             yr1, trace1 = self.fitTrace(self.image1, 1)
             yr2, trace2 = self.fitTrace(self.image2, 2)
@@ -679,6 +708,7 @@ class Order():
         #yr1 = (0,sh[0]/2-1) #Bottom half of order (A or B pos)
         #yr2 = (sh[0]/2,sh[0]-1) #Top half of order (other A or B pos)
         #yrs = [yr1,yr2]
+       
 
         if (OneOrTwo == 1):
             yr = (0,sh[0]/2-1)
@@ -687,7 +717,8 @@ class Order():
         
         yindex = np.arange(yr[0],yr[1]) #Top or Bottom of Order
         kernel = np.median(image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
-                    
+        
+ 
         centroids = []
         totals = []
         for i in np.arange(sh[1]):
@@ -698,21 +729,16 @@ class Order():
             centroid = calc_centroid(cc_sh).real - yindex.shape[0]/2.
             centroids.append(centroid)
             totals.append(total)
-
         centroids = np.array(centroids)
         totals = np.array(totals)
-        median_totals = np.median(totals)            
+        median_totals = np.nanmedian(totals)            
         
         xindex = np.arange(sh[1])
         gsubs = np.where((np.isnan(centroids)==False) & (totals>median_totals*0.25) & (totals<median_totals*1.75))
 
+
         centroids[gsubs] = median_filter(centroids[gsubs],size=50)
         coeffs = np.polyfit(xindex[gsubs],centroids[gsubs],3)
-
-        #NRC-TEMP
-        #plt.plot(xindex[gsubs], centroids[gsubs], 'k+')
-        #plt.show()
-        #####
 
         poly = np.poly1d(coeffs)
             
@@ -763,7 +789,7 @@ class Order():
 
         hdulist = pf.HDUList([hdu,uhdu,sky_hdu,usky_hdu])
 
-        hdulist.writeto(filename,clobber=True)
+        hdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -795,9 +821,15 @@ class Spec1D():
             self.file = self.writeSpec(path=write_path)
 
     def getPSF(self,range=(300,700)):
-        PSF = np.median(self.Order.image_rect[:,range[0]:range[1]],1)
+        PSF = np.median(self.Order.image_rect[:,range[0]:range[1]],1) # cut from channel 300 to channel 700 (DP 19 JAN 2016)
         npsf = PSF.size
         PSF_norm = PSF/PSF[:npsf/2-1].sum()
+        plt.figure()
+        plt.plot(PSF_norm)
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/psf_{}_wave{}.pdf'.format(self.header['DATE-OBS'],self.Order))
+        plt.plot()
+        plt.close()
+        #plt.show(block=False)
         return PSF_norm
         
     def extract(self,PSF,method='single'):
@@ -821,12 +853,58 @@ class Spec1D():
         uim = self.Order.uimage_rect
         sky = self.Order.sky_rect
         usky = self.Order.usky_rect
-        
+        plt.figure()
+        plt.imshow(self.Order.image_rect)
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/decimage_rect.pdf')
+        plt.close()
+        plt.figure()
+        plt.imshow(self.Order.uimage_rect)
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/decuimage_rect.pdf')
+        plt.close()
+        plt.figure()
+        plt.imshow(self.Order.sky_rect)
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/decsky_rect.pdf')
+        plt.close()
+        plt.figure()
+        plt.imshow(self.Order.usky_rect)
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/decusky_rect.pdf')
+        plt.close()
+        plt.figure()
+        plt.plot(PSF)
+        #plt.show()
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/decPSF.pdf')
+        plt.close()
+#        f, (ax0, ax1, ax2, ax3, ax4, ax5) = plt.subplots(6, sharex=True, sharey=False)
+#        ax0.plot(im[46,:])
+#        ax1.plot(im[47,:])
+#        ax2.plot(im[48,:])
+#        ax3.plot(im[49,:])
+#        ax4.plot(im[50,:])
+#        ax5.plot(im[51,:])
+#        f.savefig('/home/dpiskorz/Desktop/KBandData/decim_trace.pdf')
+#        f, (ax0, ax1, ax2, ax3, ax4, ax5) = plt.subplots(6, sharex=True, sharey=False)
+#        ax0.plot(uim[46,:])
+#        ax1.plot(uim[47,:])
+#        ax2.plot(uim[48,:])
+#        ax3.plot(uim[49,:])
+#        ax4.plot(uim[50,:])
+#        ax5.plot(uim[51,:])
+#        f.savefig('/home/dpiskorz/Desktop/KBandData/decuim_trace.pdf')
         for i in np.arange(sh):
             #There is something wrong with the optimal weights here. Will have to check on it later. For 
             #now, uniform weights make very little difference for high S/N spectra. 
             flux_pos[i] = (PSF[:npsf/2-1]*im[:npsf/2-1,i]/uim[:npsf/2-1,i]**2).sum() / (PSF[:npsf/2-1]**2/uim[:npsf/2-1,i]**2).sum()
             flux_neg[i] = (PSF[npsf/2:-1]*im[npsf/2:-1,i]/uim[npsf/2:-1,i]**2).sum() / (PSF[npsf/2:-1]**2/uim[npsf/2:-1,i]**2).sum()
+#            if i == 20 : print PSF[:npsf/2-1]
+#            if i == 20 : print im[:npsf/2-1,i]
+#            if i == 20 : print uim[npsf/2:-1,i]
+#            if i == 20 : print (PSF[npsf/2:-1]*im[npsf/2:-1,i]/uim[npsf/2:-1,i]**2).sum()
+#            if i == 20 : print (PSF[npsf/2:-1]**2/uim[npsf/2:-1,i]**2).sum()
+#            if i == 20 : print flux_pos[i]
             #flux_pos[i] = (PSF[:npsf/2-1]*im[:npsf/2-1,i]).sum() / (PSF[:npsf/2-1]**2).sum()
             #flux_neg[i] = (PSF[npsf/2:-1]*im[npsf/2:-1,i]).sum() / (PSF[npsf/2:-1]**2).sum()
             uflux_pos[i] = np.sqrt(1.0/(PSF[:npsf/2-1]**2/uim[:npsf/2-1,i]**2.).sum())
@@ -837,7 +915,14 @@ class Spec1D():
             usky_pos[i] = np.sqrt(1.0/(PSF[:npsf/2-1]**2/usky[:npsf/2-1,i]**2.).sum())
             usky_neg[i] = np.sqrt(1.0/(PSF[npsf/2:-1]**2/usky[npsf/2:-1,i]**2.).sum())
 
-        
+        plt.figure()
+        plt.plot(flux_pos)
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/flux_pos.pdf')
+        plt.close()
+        plt.figure()
+        plt.plot(flux_neg)
+        plt.savefig('/home/'+ user +'/Desktop/LBandData/flux_neg.pdf')
+        plt.close()
         flux_pos = ma.masked_invalid(flux_pos)
         flux_pos = ma.filled(flux_pos,1.)
         uflux_pos = ma.masked_invalid(uflux_pos)
@@ -855,7 +940,14 @@ class Spec1D():
         sky_neg = ma.filled(sky_neg,1.)
         usky_neg = ma.masked_invalid(usky_neg)
         usky_neg = ma.filled(usky_neg,1000.)
-
+        
+#        plt.figure()
+#        plt.plot(flux_pos)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/flux_pos_masked.pdf')
+#        plt.figure()
+#        plt.plot(flux_neg)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/flux_neg_masked.pdf')
+        
         sky_pos_cont = self._fitCont(self.wave_pos,sky_pos)
         sky_neg_cont = self._fitCont(self.wave_neg,sky_neg)
         return flux_pos,uflux_pos,flux_neg,uflux_neg,sky_pos-sky_pos_cont,sky_neg-sky_neg_cont,usky_pos,usky_neg
@@ -900,7 +992,7 @@ class Spec1D():
         aper_corr = 1.4
         posloc = np.argmax(PSF)
         negloc = np.argmin(PSF)
-
+        
         sa_pos = np.zeros(self.sh)
         sa_neg = np.zeros(self.sh)
 
@@ -909,14 +1001,25 @@ class Spec1D():
 
         im = self.Order.image_rect
         uim = self.Order.uimage_rect
+        
+        print "posloc", posloc
+        print "negloc", negloc
+        print np.shape(im)
 
         for i in np.arange(self.sh):
             index = np.arange(width*2+1)-width
 
             # First calculate SUM_i(F_i)
+            #print "posloc", posloc,width
+            #print type(im)
+            #print np.shape(im)
+            #print i
             F_pos = (im[posloc-width:posloc+width+1,i]).sum() 
+            #print "negloc", negloc,width
             F_neg = (im[negloc-width:negloc+width+1,i]).sum()
-
+            #print index, negloc, width, i, np.shape(im)
+            #print im[posloc-width:posloc+width+1,i]
+            #print im[negloc-width:negloc+width+1,i]
             # then SUM_i(i*F_i)
             iF_pos = (index*im[posloc-width:posloc+width+1,i]).sum()
             iF_neg = (index*im[negloc-width:negloc+width+1,i]).sum()
@@ -933,18 +1036,31 @@ class Spec1D():
         #NIRSPEC flips the spectrum on the detector (as all echelles do).
         sa_pos[i] = -sa_pos[i]
         sa_neg[i] = -sa_neg[i]
+        
+#        plt.figure()
+#        plt.plot(index)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_index.pdf')
+#        plt.figure()
+#        plt.plot(F_pos)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_F_pos.pdf')
+#        plt.figure()
+#        plt.plot(iF_pos)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_if_pos.pdf')
+#        plt.figure()
+#        plt.plot(sa_pos)
+#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_pos.pdf')
 
         return sa_pos*aper_corr,usa_pos*aper_corr,sa_neg*aper_corr,usa_neg*aper_corr
 
     def plot(self):        
         plt.plot(self.wave,self.flux_pos,drawstyle='steps-mid')
         plt.plot(self.wave,self.flux_neg,drawstyle='steps-mid')
-        plt.show()
+        #plt.show()
 
     def plotSA(self):
         plt.plot(self.wave,self.sa_pos,drawstyle='steps-mid')
         plt.plot(self.wave,self.sa_neg,drawstyle='steps-mid')
-        plt.show()
+        #plt.show()
 
     def waveGuess(self,beam='pos'):
         wrange = self.Envi.getWaveRange(self.setting,self.onum)
@@ -983,7 +1099,7 @@ class Spec1D():
         else:
             coldefs = pf.ColDefs([c1,c2,c3,c4,c7,c8,c9,c10,c11,c12])
 
-        tbhdu = pf.new_table(coldefs)
+        tbhdu = pf.BinTableHDU.from_columns(coldefs)
 
         self.header['SETNAME'] = (self.setting, 'Setting name')
         self.header['ECHLPOS'] = (self.echelle, 'Echelle position')
@@ -1016,7 +1132,7 @@ class Spec1D():
             filename = path+'/'+object+'_'+date+'_'+time+'_spec1d'+str(self.onum)+'.fits'
 
         
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -1041,7 +1157,7 @@ class WaveCal():
         filename = filename[0:length-12]
         filename = filename+'wave'+onum+'.fits'
         fullpath = self.path+'/'+filename
-        spec1d.writeto(fullpath,clobber=True)
+        spec1d.writeto(fullpath,overwrite=True)
         
         return fullpath
         
@@ -1053,6 +1169,7 @@ class WaveCal():
         plt.close()
 
         trans = self.WavePos.getModel()
+        '''
         plt.figure(self.specfile+' (Pos)')
         plt.plot(trans['wave'],trans['Radiance'])
         plt.plot(trans['wave'],trans['sky'])
@@ -1060,8 +1177,10 @@ class WaveCal():
             plt.show()
         else:
             plt.show(block=False)
-
+		'''
+		
         trans = self.WaveNeg.getModel()
+        '''
         plt.figure(self.specfile+' (Neg)')
         plt.plot(trans['wave'],trans['Radiance'])
         plt.plot(trans['wave'],trans['sky'])
@@ -1069,6 +1188,7 @@ class WaveCal():
             plt.show()
         else:
             plt.show(block=False)
+		'''
 
 class CalSpec():
     def __init__(self,scifile,stdfile,shift=0.,dtau=0.0,dowave=True,write_path=None,order=0):
@@ -1165,7 +1285,7 @@ class CalSpec():
 
         coldefs = pf.ColDefs([c1,c2,c3,c4,c5])
 
-        tbhdu = pf.new_table(coldefs)
+        tbhdu = pf.BinTableHDU.from_columns(coldefs)
         hdu = pf.PrimaryHDU(header=self.header)
         thdulist = pf.HDUList([hdu,tbhdu])
 
@@ -1173,22 +1293,22 @@ class CalSpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_calspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
     def plotBeams(self):
         plt.plot(self.wave_pos,self.flux_pos)
         plt.plot(self.wave_neg,self.flux_neg)
-        plt.show()
+        #plt.show()
 
     def plotFlux(self):
         plt.plot(self.wave,self.flux,drawstyle='steps-mid')
-        plt.show()
+        #plt.show()
 
     def plotSA(self):
         plt.plot(self.wave,self.sa,drawstyle='steps-mid')
-        plt.show()
+        #plt.show()
 
 class SASpec():
     def __init__(self, SA_ortho_file, SA_para_file, write_path=None,order=1):
@@ -1227,7 +1347,7 @@ class SASpec():
 
         coldefs = pf.ColDefs([c1,c2,c3,c4,c5])
 
-        tbhdu = pf.new_table(coldefs)
+        tbhdu = pf.BinTableHDU.from_columns(coldefs)
         hdu = pf.PrimaryHDU()
         thdulist = pf.HDUList([hdu,tbhdu])
 
@@ -1235,7 +1355,7 @@ class SASpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_saspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -1258,7 +1378,10 @@ class Reduction():
     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
                  sci_range=None, std_range=None, path=None, base=None,level1=True,level2=True,
                  level1_path='L1FILES',shift=0.0, dtau=0.0, save_dark=False, save_flat=False, SettingsFile=None,
-                 sci_tname=None, std_tname=None, hold_plots=True, **kwargs):
+                 sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+
+        if (hold == False):
+            hold_plots = False
 
         self.save_dark = save_dark
         self.save_flat = save_flat
@@ -1277,8 +1400,8 @@ class Reduction():
         self.std_names       = makeFilelist(base,std_range,path=path)
 
         self.mode  = 'SciStd'
-        self.tdict = {'science':self.sci_names1,'standard':self.std_names}
-        self.ndict = {'science':sci_tname, 'standard':std_tname}
+        self.tdict = {'science':self.sci_names1} #,'standard':self.std_names}
+        self.ndict = {'science':sci_tname}#, 'standard':std_tname}
         self.hold_plots = hold_plots
 
         if level1:
@@ -1286,32 +1409,43 @@ class Reduction():
 
         if level2:
             self._level2()
-        
-    def _level1(self):
-        FDark = Dark(self.flat_dark_names)
-        ODark = Dark(self.obs_dark_names,save=self.save_dark)
-        OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile)
-        
-        level1_files = {}
-        for key in self.tdict.keys():
-            ONod    = Nod(self.tdict[key],flat=OFlat,dark=ODark, tname=self.ndict[key], SettingsFile=self.SettingsFile) #NRC-EDIT, added SettingsFile to the Nod call
-            norders = ONod.getNOrders()
-            target_files = []
-            for i in np.arange(norders):
-                print '### Processing order', i+1
-                OOrder   = Order(ONod,onum=i+1,write_path='SPEC2D')
-                print '### 2D order extracted'
-                OSpec1D  = Spec1D(OOrder,sa=True,write_path='SPEC1D')
-                OWaveCal = WaveCal(OSpec1D.file,path='WAVE',am=OSpec1D.airmass, hp=self.hold_plots)
-                OOrder_files = {'2d':OOrder.file, '1d':OSpec1D.file, 'wave':OWaveCal.file}
-                target_files.append(OOrder_files)
-                
-            level1_files[key] = target_files
 
-        filename = self._getLevel1File(self.ndict['science']) 
-        f = open(self.level1_path+'/'+filename, 'w')
-        json.dump(level1_files,f)
-        f.close()
+    def _level1(self):
+		FDark = Dark(self.flat_dark_names)
+		ODark = Dark(self.obs_dark_names,save=self.save_dark)
+		OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile)
+        
+		level1_files = {}
+		for key in self.tdict.keys():
+			ONod    = Nod(self.tdict[key],flat=OFlat,dark=ODark, tname=self.ndict[key], SettingsFile=self.SettingsFile) 
+			norders = ONod.getNOrders()
+			target_files = []
+			for i in np.arange(norders):
+				#if i == 0: continue					### if i == 0: continue, skips 0
+				#if i == 1: continue
+				#if i == 4: continue
+				#if i == 2: continue
+				print '### Processing order', i+1
+				OOrder   = Order(ONod,onum=i+1,write_path='SPEC2D')
+				print OOrder.fitTrace(OOrder.image1, 1)
+				#plt.figure()
+				#plt.imshow(OOrder.uimage1, hold=True)
+				#plt.show()
+				#plt.figure()
+				#plt.imshow(OOrder.uimage_rect, hold=True)
+				#plt.show()
+				print '### 2D order extracted'
+				OSpec1D  = Spec1D(OOrder,sa=True,write_path='SPEC1D')
+				OWaveCal = WaveCal(OSpec1D.file,path='WAVE',am=OSpec1D.airmass, hp=self.hold_plots)
+				OOrder_files = {'2d':OOrder.file, '1d':OSpec1D.file, 'wave':OWaveCal.file}
+				target_files.append(OOrder_files)
+                
+			level1_files[key] = target_files
+		
+		filename = self._getLevel1File(self.ndict['science']) 
+		f = open(self.level1_path+'/'+filename, 'w')
+		json.dump(level1_files,f)
+		f.close()
 
     def _level2(self):
 
@@ -1341,7 +1475,10 @@ class SAReduction(Reduction):
                  sci_range1=None, sci_range2=None, std_range=None, path=None, base=None,
                  level1_path='L1FILES', shift1=0.0, dtau1=0.0, shift2=0.0, dtau2=0.0,
                  level1=True, level2=True, save_dark=False, save_flat=False, SettingsFile=None,
-                 sci_tname=None, std_tname=None, hold_plots=True, **kwargs):
+                 sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+
+        if (hold == False):
+            hold_plots = False
         
         self.save_dark = save_dark
         self.save_flat = save_flat
@@ -1438,4 +1575,4 @@ def calc_centroid(cc,cwidth=15):
 
 def write_fits(array,filename='test.fits'):
     hdu = pf.PrimaryHDU(array)
-    hdu.writeto(filename,clobber=True)
+    hdu.writeto(filename,overwrite=True)
