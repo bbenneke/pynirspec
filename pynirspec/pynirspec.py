@@ -2,6 +2,7 @@ import warnings
 import json
 import os
 import ConfigParser as cp
+import time as t
 
 import numpy as np
 import numpy.ma as ma
@@ -15,9 +16,6 @@ from collections import Counter
 import sys
 import inpaint as inpaint
 import matplotlib.cm as cm
-user = 'pelletier'
-
-
 sys.path.insert(0, '../atmopt')
 import rfm_tools as rfm
 #test
@@ -56,7 +54,6 @@ class Environment():
             self.detpars.read(sys_dir+'/'+'detector.ini')
         else:
             self.detpars.read(detpars_file)
-            
 
     def _getSysPath(self):
         sys_dir, this_filename = os.path.split(__file__)
@@ -88,13 +85,15 @@ class Environment():
         Cs = json.loads(C_str)
         Rs = json.loads(R_str)
         return {'A':As,'B':Bs,'C':Cs,'R':Rs}
-        
+
+    # Returns a dict containing detector gain, read noise, dark current
     def getDetPars(self):
         gain = self.detpars.getfloat('Detector','gain')
         rn   = self.detpars.getfloat('Detector','rn')
         dc   = self.detpars.getfloat('Detector','dc')
         return {'gain':gain,'rn':rn,'dc':dc}
-        
+
+    # How many orders of spectra
     def getNOrders(self,setting):
         return self.settings.getint(setting,'norders')
 
@@ -113,11 +112,11 @@ class Observation():
 
     Attributes
     ----------
-    type
-    Envi
-    flist
-    planes
-    header
+    type    # darks/flats/sci etc.
+    Envi    # instrument settings and observation details (as contained in the .ini files)
+    flist   # file list
+    planes  # list of opened fits files: e.g. planes[0] is the first file, and planes[0][0] is the PrimaryHDU of the fits file
+    header  # header of a specific fits file
 
     Methods
     -------
@@ -129,31 +128,37 @@ class Observation():
     writeImage
    
     '''
-    def __init__(self,filelist,type='image', SettingsFile=None,tname=None):
+    def __init__(self,filelist,type='image', SettingsFile=None,tname=None,ut_date=None):
         self.type = type
         self.Envi = Environment(settings_file=SettingsFile)
         self.flist = filelist
         self._openList(tname)
         self._makeHeader(tname)
-        
+        self.ut_date = ut_date
+        self.sci_tname = tname
+
+    # Open the files and get exp and det parameters from header and .ini file respectively
     def _openList(self, tname):
         warnings.resetwarnings()
         warnings.filterwarnings('ignore', category=UserWarning, append=True)
 
+        # Construct a list of opened fits files (HDU lists)
         self.planes = []
         for file in self.flist:
             plane = pf.open(file,ignore_missing_end=True)
             self.planes.append(plane)
         self._makeHeader(tname)
 
+        # Get exposure parameters from header
         self.exp_pars = self.getExpPars()
+        # Get detector parameters from .ini files
         self.det_pars = self.Envi.getDetPars()
 
+    # Extract header info from the first file
     def _makeHeader(self, tname=None):
         self.header = self.planes[0][0].header 
         
         #The NIRSPEC headers have a couple of illegally formatted keywords
-        print self.header['FILENAME']          # Added by Bjorn and Stefan
         try:
             del self.header['GAIN.SPE']
         except:
@@ -163,20 +168,26 @@ class Observation():
         except:
             print ('FREQ.SPE already deleted from hdr.')
 
+        # Replace object name in header with custom supplied name
+        if (tname is not None):
+            self.header['OBJECT'] = tname.replace(' ','')
+
+    # Returns a dict of exposure info
     def getExpPars(self):
         coadds   = self.getKeyword('COADDS')[0]
         sampmode = self.getKeyword('SAMPMODE')[0]
         nreads   = self.getKeyword('MULTISPE')[0]
         itime    = self.getKeyword('ITIME')[0]
+        # Number of images
         nexp     = len(self.planes)
         return {'coadds':coadds,'sampmode':sampmode,'nreads':nreads,'itime':itime,'nexp':nexp}
 
+    # Return correct setting name, echelle pos, and crossdisp pos
     def getSetting(self):
         echelle   = self.getKeyword('ECHLPOS')
         crossdisp = self.getKeyword('DISPPOS')
-# commented out 25 jan 16 by dp bc server crash at flat=399 for 1 dec 2015 data and motors not reintialized, header not written correctly
-#        for ii, (e, c,) in enumerate(zip(echelle, crossdisp)) : 
-#           print ii, e, c
+
+        # Check that all exposures are taken with the same echelle position and cross disperser position
         assert len([e for e in echelle if e==echelle[0]])==len(echelle), \
             'All exposures must be taken with the same setting!'
         assert len([c for c in crossdisp if c==crossdisp[0]])==len(crossdisp), \
@@ -194,15 +205,21 @@ class Observation():
         # print (echelles)
         # print (crossdisps)
 
+        # Note: the following steps are unnecessary when user supplies a custom .ini file
+        # Get indices of echelle position in .ini file that match that in the header
         setsub1 = [i for i,v in enumerate(echelles) if float(v)==echelle]
         # print (setsub1)
+        # Get indices of crossdisp position in .ini file that match that in the header
         setsub2 = [i for i,v in enumerate(crossdisps) if float(v)==crossdisp]
         # print (setsub2)
+        # Determine the correct section (configuration) as
+        # the one containing both the correct echelle pos and crossdisp pos
         sub = [i for i in setsub1 if i in setsub2]
         # print (sub)
         #print (self.Envi.getSections()[sub[0]])
         return self.Envi.getSections()[sub[0]],echelle,crossdisp
 
+    # Return a list of airmasses, converting faulty values to the mean
     def getAirmass(self):
         airmasses = self.getKeyword('AIRMASS') 
         airmasses = np.array([airmass if type(airmass) is not str else -1 for airmass in airmasses])
@@ -210,6 +227,7 @@ class Observation():
         airmasses[np.where(airmasses==-1)] = mean
         return airmasses
 
+    # Get number of orders
     def getNOrders(self):
         setting,echelle,crossdisp = self.getSetting()
         return self.Envi.getNOrders(setting)
@@ -218,6 +236,7 @@ class Observation():
         target_name = self.header['OBJECT']
         return target_name
 
+    # Prepare data stack in units of e- counts, and an error stack
     def _getStack(self):
         
         nexp = self.exp_pars['nexp']
@@ -228,15 +247,19 @@ class Observation():
         ustack = np.zeros((nx,ny,nexp))
         
         for i,plane in enumerate(self.planes):
+            # data stack (counts*gain = e- count)
             stack[:,:,i]  = plane[0].data*self.det_pars['gain'] #convert everything to e-
+            # error stack
             ustack[:,:,i] = self._error(plane[0].data)
         return stack,ustack
 
+    # Compute uncertainty as sqrt of variance
     def _error(self,data):
         var_data = np.abs(data+self.exp_pars['itime']*self.det_pars['dc']+
                           self.det_pars['rn']**2/self.exp_pars['nreads'])
         return np.sqrt(var_data)
-    
+
+    # Method to subtract darks from flats
     def subtractFromStack(self,Obs):
         warnings.resetwarnings()
         warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
@@ -246,6 +269,7 @@ class Observation():
         except:
             print 'Subtraction failed - no image calculated'
 
+    # Flat-field correction
     def divideInStack(self,Obs):
         warnings.resetwarnings()
         warnings.filterwarnings('ignore', category=RuntimeWarning, append=True)
@@ -254,12 +278,14 @@ class Observation():
             plane = self.stack[:,:,i]
             uplane = self.ustack[:,:,i]
             uplane = np.sqrt((uplane/plane)**2+(Obs.uimage/Obs.image)**2)
+            # Divide data by normalized flats
             plane /= Obs.image
             uplane *= np.abs(plane)
 
             self.stack[:,:,i]  = plane
             self.ustack[:,:,i] = uplane
-    
+
+    # Collapse darks and flats sequences into single images, with a weighted average (assuming Gaussian error)
     def _collapseStack(self,stack=None,ustack=None,method='SigClip',sig=50.):
         '''
         If called without the stack keyword set, this will collapse the entire stack.
@@ -273,13 +299,15 @@ class Observation():
         #stack_stddev = np.std(stack,2)
         #shape = stack.shape
         #masked_stack = ma.zeros(shape)
-        
+
+        # Mask invalid points so that errors do not occur in math operations
         masked_stack = ma.masked_invalid(stack)
         masked_ustack = ma.masked_invalid(ustack)
-        
+
         # print (masked_stack.shape)
         # print (masked_ustack.shape)
 
+        # Take weighted average of a sequence of images
         image = ma.average(masked_stack,2,weights=1./masked_ustack**2)
         uimage = np.sqrt(ma.mean(masked_ustack**2,2)/ma.count(masked_ustack,2))
 
@@ -288,6 +316,7 @@ class Observation():
 
         return image, uimage
 
+    # Save image (data + uncertainty)
     def writeImage(self,filename=None):
         if filename is None:
             filename = self.type+'.fits'
@@ -297,128 +326,180 @@ class Observation():
         hdulist = pf.HDUList([hdu,uhdu])
         hdulist.writeto(filename,clobber=True)
 
+    # Returns list of values for a specific header key
     def getKeyword(self,keyword):
         try:
             klist = [plane[0].header[keyword] for plane in self.planes]
             return klist
         except ValueError:
             print "Invalid header keyword"
-        
-class Flat(Observation):
-    def __init__(self,filelist,dark=None,norm_thres=5000.,save=False,**kwargs):
-        
-        Observation.__init__(self,filelist,**kwargs)
-        self.type = 'flat'
-        self.stack,self.ustack = self._getStack()
-        self.nplanes = self.stack.shape[2]
-        self.height = self.stack[:,:,0].shape[0]
-        
-        self.setting,self.echelle,self.crossdisp = self.getSetting()
 
+## Flat class, extends the class Observation
+class Flat(Observation):
+    def __init__(self,filelist,dark=None,norm_thres=5000.,save=False,ut_date=None,sci_tname=None,**kwargs):
+
+        # Inherits __init__ function from Observation class
+        Observation.__init__(self,filelist,ut_date=ut_date,tname=sci_tname,**kwargs)
+        self.type = 'flat'
+        # Convert images to units of e- count
+        self.stack,self.ustack = self._getStack()
+        # Number of flats
+        self.nplanes = self.stack.shape[2]
+        # Frame size of flats
+        self.height = self.stack[:,:,0].shape[0]
+        # Get setting parameters
+        self.setting,self.echelle,self.crossdisp = self.getSetting()
+        # Combine flats through a weighted average
         self.image,self.uimage = self._collapseStack()
 
+        # Whether to subtract flat darks from flats
         if dark:
             self.subtractFromStack(dark)
-
+        # Normalize flats by median
         self._normalize(norm_thres)
 
-        #Where the flat field is undefined, it's set to 1 to avoid divide by zeros.
+        # Where the flat field is faulty, it's set to 1 to avoid divide by zeros.
         self.image[np.where(self.image<0.1)] = 1
         if save:
-            self.writeImage()
-        plt.figure()
-        plt.imshow(self.image)
-        #plt.close()        
-        plt.title('Flats')
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/flats.pdf')
-        plt.close()
-        
+            self.writeImage(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/' + self.type + '.fits')
+
+    # Normalize flats with median value (larger than a given threshold)
     def _normalize(self,norm_thres):
         flux = np.median(self.image[np.where(self.image>norm_thres)])
         self.image = self.image/flux
         self.uimage = self.uimage/flux
-
+    # Not used
     def makeMask(self):
         return np.where(self.image<0.1,0,1)
 
+## Dark class, extends the class Observation
 class Dark(Observation):
-    def __init__(self,filelist,save=False,**kwargs):
-
-        Observation.__init__(self,filelist, **kwargs)
+    def __init__(self,filelist,save=False,ut_date=None,sci_tname=None,**kwargs):
+        # Inherits __init__ function from Observation class
+        Observation.__init__(self,filelist,ut_date=ut_date,tname=sci_tname,**kwargs)
         self.type = 'dark'
+        # Convert images to units of e- count
         self.stack,self.ustack = self._getStack()
+        # Number of darks
         self.nplanes = self.stack.shape[2]
+        # Frame size of darks
         self.height = self.stack[:,:,0].shape[0]
-
+        # Combine darks using a weighted average
         self.image,self.uimage = self._collapseStack()
-        self._badPixMap()
+        # Make bad pixel map (see function below)
+        self._badPixMap(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/badpix.dmp')
+        # Whether to save combined dark frame
         if save:
-            self.writeImage()
-        plt.figure()
-        plt.imshow(self.image)
-        #plt.close()	       
-        plt.title('Darks')
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/darks.pdf')
-        plt.close()
-        
+            self.writeImage(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/' + self.type + '.fits')
+
+    # Create bad pixel map
     def _badPixMap(self,clip=30,filename='badpix.dmp'):
         median = np.median(self.image)
+        # Variance is computed for values between -100 and 100 - why a range???
         var  = tvar(self.image,(-100,100))
+        # Bad pixels are defined as those where the count-median is greater than 30*Sqrt(variance)
         self.badpix = ma.masked_greater(self.image-median,clip*np.sqrt(var))
+
+        # Save the bad pixel map as a numpy masked array
         if filename is not None:
             self.badpix.dump(filename)
-        
+
+## Class for science images (both A and B nods). Prepares A-B images, as well as a sky image
 class Nod(Observation):
     def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',**kwargs):
 
+        # Inherits Observation
         Observation.__init__(self,filelist,**kwargs)
-        self.type = 'nod'
-                
+        self.type = 'nod'                
         self.setting,self.echelle,self.crossdisp = self.getSetting()
+        # Get list of airmasses through the science sequence
         self.airmasses = self.getAirmass()
-
+        # Mean airmass
         self.airmass = np.mean(self.airmasses)
-        
+
+        # List of RA, DEC, and file numbers for science images
         RAs  = self.getKeyword('RA')
         DECs = self.getKeyword('DEC')
         FileNums = self.getKeyword('FILENUM')        
 
-        #A average nod requires a Pair Stack. 
+        # Get indices of each AB nod pair, e.g. [(0, 1), (3, 2), (4, 5), (7, 6), (8, 9), (11, 10)]
         pairs = self._getPairs(RAs,DECs,FileNums)
+        # Get sequence of A-B images from nod pairs
         self.stack,self.ustack = self._makePairStack(pairs)
-
+        
+        # self.stack,self.ustack = self._getStack()  #MLB ADD - these are the A, B images (not A-B)
+        # Frame size
         self.height = self.stack[:,:,0].shape[0]
+
+        plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
+        plt.colorbar()
+        plt.text(100, 100, '1 A-B BEFORE dividing by flat & bp correction')
+        plt.savefig('../pynirspec-out/2017_11_03/sample-A_B-before-flattening.png')
+
+        # Divide by normalized flats
         if flat:
             self.divideInStack(flat)
+        # Correct bad pixels through a weighted local mean
         if badpix:
             badmask = np.load(badpix)
             self._correctBadPix(badmask)
 
+        plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
+        plt.colorbar()
+        plt.text(100, 100, '1 A-B AFTER dividing by flat & bp correction')
+        plt.savefig('../pynirspec-out/2017_11_03/sample-A_B-after-flattening.png')
+        # t.sleep(5)
+        #plt.close()
+
+       # Reassign variable names for A-B images
         self.TargetStack, self.UTargetStack = self.stack, self.ustack
+
+        # stack_t = self.TargetStack
+        # print (type(stack_t))
+        # print (stack_t.shape)
         
-        #An averaged sky frame is constructed using the off-beam pixels
+        # An averaged sky frame is constructed using the off-beam pixels
+        # Separated stacks for A images and B images
         stackA,ustackA,stackB,ustackB = self._makeSingleBeamStacks(pairs)
         beamStacks = [(stackA,ustackA),(stackB,ustackB)] 
 
+        # Creates preprocessed (not dark-subtracted???) images for A image and B image separately)
         beam_sky_stacks, beam_usky_stacks = [], []
+        test_count = 0
         for beamStack in beamStacks:
-            self.stack = beamStack[0] 
-            self.ustack = beamStack[1]   
+            self.stack = beamStack[0]
+            self.ustack = beamStack[1]
+
+            if test_count == 0:
+                #Plot image before flat correction
+                plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
+                plt.colorbar()
+                plt.text(100, 100, '1 nod BEFORE dividing by flat & bp correction')
+                plt.savefig('../pynirspec-out/2017_11_03/sample-Anod-before-flattening.png')
+
             if flat:
                 self.divideInStack(flat)
+
             if badpix:
                 badmask = np.load(badpix)
                 self._correctBadPix(badmask)
-            
+
+            if test_count == 0:
+                #Plot flat-corrected image to compare
+                plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
+                plt.colorbar()
+                plt.text(100, 100, '1 nod AFTER dividing by flat & bp correction')
+                plt.savefig('../pynirspec-out/2017_11_03/sample-Anod-after-flattening.png')
+
+
             beam_sky_stacks.append(self.stack)
             beam_usky_stacks.append(self.ustack)
+            test_count = test_count + 1
 
         self.beamSkyStacks  = beam_sky_stacks
         self.beamUSkyStacks = beam_usky_stacks
 
-            
+    # Correct bad pixels using an iterative local mean method from inpaint.py
     def _correctBadPix(self,badmask):
         for i in np.arange(self.stack.shape[2]):
             plane = self.stack[:,:,i]            
@@ -431,22 +512,27 @@ class Nod(Observation):
             NANMask = maskedImage.filled(np.NaN)            
             self.ustack[:,:,i] = inpaint.replace_nans(NANMask,method='localmean')          
             
-
+    # Compute A-B image for each AB nod pair
     def _makePairStack(self,pairs):
+        # Number of AB pairs
         npairs = len(pairs)
+        # x and y frame sizes
         nx = self.planes[0][0].header['NAXIS1']
         ny = self.planes[0][0].header['NAXIS2']
 
+        # Convert sci images to units of e- counts
         stack,ustack = self._getStack()
         pair_stack  = np.zeros((nx,ny,npairs))
         pair_ustack = np.zeros((nx,ny,npairs))
-        
+
+        # Iterate over all pairs to compute A-B for each pair
         for i,pair in enumerate(pairs):
             pair_stack[:,:,i] = stack[:,:,pair[0]] - stack[:,:,pair[1]]
             pair_ustack[:,:,i] = np.sqrt(ustack[:,:,pair[0]]**2 + ustack[:,:,pair[1]]**2)
             
         return pair_stack,pair_ustack
 
+    # Returns stacks for A nods and B nods
     def _makeSingleBeamStacks(self,pairs):
         npairs = len(pairs)
         nx = self.planes[0][0].header['NAXIS1']
@@ -465,6 +551,9 @@ class Nod(Observation):
             ustackB[:,:,i] = ustack[:,:,pair[1]]
         return stackA,ustackA,stackB,ustackB
 
+    # Determine which images are A nods, and which are B nods
+    # Returns a list of arrays, where each array is a AB pair
+    # e.g. [(0, 1), (3, 2), (4, 5), (7, 6), (8, 9), (11, 10)] for 12 images in a standard ABBA pattern
     def _getPairs(self,RAs,DECs,FileNums):
         nexp = len(RAs)                
         assert nexp % 2 ==0, "There must be an even number of exposures"
@@ -561,10 +650,12 @@ class Nod(Observation):
                 ii+=2
             else:
                 ii+=1
-
+        #print (pairs)
         return pairs
 
-
+## Class to prepare a single order, resulting in a 2D spectral order, saved in SPEC2D/
+## 1) create A-B images for a specific order, 2) shift images to match pos of the first image,
+## 3) combine images, and 4) rectify the combined image by fitting a polynomial
 class Order():
     def __init__(self,Nod,onum=1,trace=None,write_path=None):
         self.type = 'order'
@@ -573,56 +664,55 @@ class Order():
         self.echelle = Nod.echelle
         self.crossdisp = Nod.crossdisp
         self.airmass = Nod.airmass
-        
         self.Envi    = Nod.Envi
+        # Order being processed
         self.onum    = onum
-
+        # Spatial range of order in units of pixels
         self.yrange = self.Envi.getYRange(self.setting,onum)
         
-        #COMBINE IMAGES FOR SOURCE EXTRACTION
+        # Crop A-B images in the spatial direction to extract a single order
         self.stack  = Nod.TargetStack[self.yrange[0]:self.yrange[1],:,:]
-#        print np.shape(self.stack)
-#        for ind,val in enumerate(self.stack[0,0,:]) : 
-#            plt.figure()
-#            plt.imshow(self.stack[:,:,ind])
-#            plt.savefig('/home/dpiskorz/Desktop/KBandData/decstack'+str(ind)+'.pdf')
+        #print (self.stack.shape)
         self.ustack = Nod.UTargetStack[self.yrange[0]:self.yrange[1],:,:]
         nexp = len(self.stack[0,0,:])
 
+        img_stack = self.stack
+
+        # Get y offsets between the same order from each image
         offsets1, offsets2 = self._findYOffsets()
+        # Shift based on offsets, so that when combining the images, the order from different images fit each other
         self.stack1  = self._yShift(offsets1,self.stack)
         self.ustack1 = self._yShift(offsets1,self.ustack)
         self.stack2  = self._yShift(offsets2,self.stack)
         self.ustack2 = self._yShift(offsets2,self.ustack)
 
+        # Combine A-B images with weighted average
         self.image1, self.uimage1 = self._collapseOrder(stack=self.stack1, ustack=self.ustack1)
         self.image2, self.uimage2 = self._collapseOrder(stack=self.stack2, ustack=self.ustack2)
-        plt.figure()
-        plt.imshow(self.image1)
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/spec1.pdf')
-        plt.close()
-        plt.figure()
-        plt.imshow(self.image2)
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/spec2')
-        plt.close()
+
+
+        # Fit polynomial to rectify combined A-B image
         if trace is None:
             yr1, trace1 = self.fitTrace(self.image1, 1)
             yr2, trace2 = self.fitTrace(self.image2, 2)
             yrs, traces  = [yr1, yr2], [trace1, trace2]
-            
+  
         images, uimages = [self.image1, self.image2], [self.uimage1, self.uimage2]
 
+        # Use trace to correct for non-linearity in combined order, i.e. rectifying
         self.image_rect, self.uimage_rect = self.yRectify(images, uimages, yrs, traces)
         self.sh = self.image_rect.shape
 
+        # Subtract median of each column from the same column - SKY SUBTRACTION METHOD
         self._subMedian()
 
-        #COMBINE SKY IMAGES
+        # Repeat above for individual A and B images
         self.beamSkyStacks  = Nod.beamSkyStacks  
         self.beamUSkyStacks = Nod.beamUSkyStacks
 
         beamSkyRect, beamUSkyRect = [], []
         for beamSkyStack, beamUSkyStack in zip(self.beamSkyStacks, self.beamUSkyStacks):
+            # Crop sky images in spatial direction to extract a single order
             beamSkyStackO  = beamSkyStack[self.yrange[0]:self.yrange[1],:,:]
             beamUSkyStackO = beamUSkyStack[self.yrange[0]:self.yrange[1],:,:]
             
@@ -640,8 +730,21 @@ class Order():
 
         self.sky_rect  = beamSkyRect[0]
         self.usky_rect = beamUSkyRect[0]
-        ssubs = np.where(beamSkyRect[1]-beamSkyRect[0]<2.*beamUSkyRect[0])
 
+        # print ('sky_rect shape')
+        # print (self.sky_rect.shape)
+
+        # plt.imshow(self.sky_rect, cmap='gray')
+        # plt.colorbar()
+        # plt.text(30, 30, 'sky rect initial')
+        # plt.show()
+        # #t.sleep(5)
+        # plt.close()
+
+        ## These lines create the sky! This is done by using values from both the A and B image
+        ## Specifically, (B-A) image is made, and where the counts are < 2*error,
+        ## the counts from A are replace with the counts from B. This ensures the spectra in A is replaced by sky counts from B
+        ssubs = np.where(beamSkyRect[1]-beamSkyRect[0]<2.*beamUSkyRect[0])
         self.sky_rect[ssubs]  = beamSkyRect[1][ssubs]
         self.usky_rect[ssubs] = beamUSkyRect[1][ssubs]
 
@@ -671,21 +774,29 @@ class Order():
 
 
     def _collapseOrder(self, stack=None, ustack=None):
+
+        sh = stack.shape
+        int_stack = np.zeros(sh)
+        int_ustack = np.zeros(sh)
+        
+        index = np.arange(sh[0])
+   
         masked_stack = ma.masked_invalid(stack)
         masked_ustack = ma.masked_invalid(ustack)
-        
+
         image = ma.average(masked_stack,2,weights=1./masked_ustack**2)
         uimage = np.sqrt(ma.mean(masked_ustack**2,2)/ma.count(masked_ustack,2))
         
         return image, uimage
 
-
+    # Shifts images in y (spatial direction) so that they are aligned for combining
     def _yShift(self,offsets,stack):
 
         sh = stack.shape
         internal_stack = np.zeros(sh)
 
         index = np.arange(sh[0])
+
         for plane in np.arange(sh[2]):
             for i in np.arange(sh[1]):
                 col = np.interp(index-offsets[plane],index,stack[:,i,plane])
@@ -693,43 +804,42 @@ class Order():
 
         return internal_stack
 
-
-    def _findYOffsets(self, kwidth=50):
+    # Compute offsets in y (spatial direction) between different images
+    def _findYOffsets(self, kwidth=100):
         sh = self.stack.shape
         yr1 = (0, sh[0]/2-1)     #Bottom half of order (A or B pos)
         yr2 = (sh[0]/2,sh[0]-1)  #Top half of order (other A or B pos)
         yrs = [yr1,yr2]
 
         offsets1 = np.empty(0)
-        offsets2 = np.empty(0) 
+        offsets2 = np.empty(0)
+        # Iterate twice, for bottom half and then top half of order
         for i in range(0, len(yrs)):
             yr = yrs[i]
-            yindex = np.arange(yr[0],yr[1]) #Top or Bottom of Order
+            yindex = np.arange(yr[0],yr[1]+1) #Top or Bottom of Order
+            # Use the first A-B image as the kernel
             kernel_image = self.stack[:,:,0]
+            #print (yindex)
+
+            # Median of values along the wavelength direction, over the central 200 pixels
             kernel_o = np.median(kernel_image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
+            #print ((kernel_image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth]).shape)
+            #print (kernel_o)
+            # Median of the top or bottom half of the order
             kernel_med = np.median(kernel_o)
+            # why subtract, what is the kernel???
             kernel = np.subtract(kernel_o, kernel_med)
 
+            # Iterate over A-B images
             for j in range(0,sh[2]):
                 image = self.stack[:,:,j]                
                 profile_o = np.median(image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
                 profile_med = np.median(profile_o)
                 profile = np.subtract(profile_o, profile_med)
+                # Cross correlation between kernel and image - ???
                 cc = fp.ifft(fp.fft(kernel)*np.conj(fp.fft(profile)))
                 cc_sh = fp.fftshift(cc)
                 cen = calc_centroid(cc_sh).real - yindex.shape[0]/2.
-
-                ## PLOT ##
-                #fig = plt.figure('Order ' + str(self.onum) + ' / AB set ' + str(j+1))
-                #ax = fig.add_subplot(111)
-                #if (j == 0):
-                #    kernel_plot = np.interp(yindex-cen,yindex,profile)
-                #ax.plot(yindex, kernel_plot, color='blue')
-                #ax.plot(yindex, profile, color='green')
-                #profile_new = np.interp(yindex-cen,yindex,profile)
-                #ax.plot(yindex, profile_new, color='red')
-                #plt.show()
-                #####
 
                 if (i == 0):
                     offsets1 = np.append(offsets1,cen)
@@ -746,25 +856,20 @@ class Order():
 
         return offsets1, offsets2
 
-
-    def fitTrace(self, image, OneOrTwo, kwidth=10):
+    def fitTrace(self, image, OneOrTwo, kwidth=40):
         sh = image.shape
-        #yr1 = (0,sh[0]/2-1) #Bottom half of order (A or B pos)
-        #yr2 = (sh[0]/2,sh[0]-1) #Top half of order (other A or B pos)
-        #yrs = [yr1,yr2]
-       
 
         if (OneOrTwo == 1):
             yr = (0,sh[0]/2-1)
         if (OneOrTwo == 2):
             yr = (sh[0]/2,sh[0]-1)
         
-        yindex = np.arange(yr[0],yr[1]) #Top or Bottom of Order
+        yindex = np.arange(yr[0],yr[1]+1) #Top or Bottom of Order
         kernel = np.median(image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
-        
- 
+                    
         centroids = []
         totals = []
+        # Iterate over each col (wavelength direction)
         for i in np.arange(sh[1]):
             col_med = np.median(image[yindex,i])
             total = np.abs((image[yindex,i]-col_med).sum())
@@ -773,15 +878,16 @@ class Order():
             centroid = calc_centroid(cc_sh).real - yindex.shape[0]/2.
             centroids.append(centroid)
             totals.append(total)
+
         centroids = np.array(centroids)
         totals = np.array(totals)
-        median_totals = np.nanmedian(totals)            
+        median_totals = np.median(totals)            
         
         xindex = np.arange(sh[1])
         gsubs = np.where((np.isnan(centroids)==False) & (totals>median_totals*0.25) & (totals<median_totals*1.75))
 
-
         centroids[gsubs] = median_filter(centroids[gsubs],size=50)
+        # Fit 3-order polynomial to order
         coeffs = np.polyfit(xindex[gsubs],centroids[gsubs],3)
 
         poly = np.poly1d(coeffs)
@@ -795,7 +901,8 @@ class Order():
         uimage_rect = np.zeros(sh)
         
         for yr,trace,image,uimage in zip(yrs,traces,images,uimages):
-            index = np.arange(yr[0],yr[1])
+            index = np.arange(yr[0],yr[1]+1) 
+
             for i in np.arange(sh[1]):
                 col = np.interp(index-trace(i),index,image[index,i])
                 image_rect[index,i] = col
@@ -804,7 +911,7 @@ class Order():
 
         return image_rect,uimage_rect
         
-        
+    # Subtract median of each column from that column
     def _subMedian(self):
         #print (self.image_rect[:,500])
         #print (np.median(self.image_rect, axis=0)[500])
@@ -829,7 +936,6 @@ class Order():
         uhdu = pf.ImageHDU(self.uimage_rect)
         sky_hdu = pf.ImageHDU(self.sky_rect)
         usky_hdu = pf.ImageHDU(self.usky_rect)
-        
 
         #print (type(hdu.data))
 
@@ -840,10 +946,12 @@ class Order():
 
         hdulist = pf.HDUList([hdu,uhdu,sky_hdu,usky_hdu])
 
-        hdulist.writeto(filename,overwrite=True)
+        hdulist.writeto(filename,clobber=True)
 
         return filename
 
+## Class to extract 1D spectra for positive and negative parts of an order respectively
+## Returns spectra from positive and negative part, the associated errors, and the spectra of the sky
 class Spec1D():
     def __init__(self,Order,sa=True,write_path=None):
         self.Order   = Order
@@ -856,38 +964,56 @@ class Spec1D():
         self.Envi    = Order.Envi
         self.sh      = Order.sh[1]
         self.sa      = sa
+        self.writepath = write_path
 
-
+        # Normalized 1D PSF
         PSF = self.getPSF()
-
         self.disp = self.Envi.getDispersion(self.setting,self.onum)
+
+        # Wavelength guesses for each pixel
         self.wave_pos = self.waveGuess(beam='pos')
         self.wave_neg = self.waveGuess(beam='neg')
-        
+
+        # print ('wave pos & wave neg')
+        # print (self.wave_pos)
+        # print (self.wave_neg)
+
+        # Get 1D flux for pos and neg orders, as well as sky background
         self.flux_pos,self.uflux_pos,self.flux_neg,self.uflux_neg,self.sky_pos,self.sky_neg,self.usky_pos,self.usky_neg = self.extract(PSF,method='single')
-        if sa:
-            self.sa_pos,self.usa_pos,self.sa_neg,self.usa_neg = self.SpecAst(PSF)
 
-        if write_path:
-            self.file = self.writeSpec(path=write_path)
+        # print ('flux pos and flux neg')
+        # print (self.flux_pos).shape
+        # print (self.flux_neg).shape
+        #
+        # print (self.flux_pos)
+        # print (self.flux_neg)
 
-    def getPSF(self,range=(300,700)):
-        PSF = np.median(self.Order.image_rect[:,range[0]:range[1]],1) # cut from channel 300 to channel 700 (DP 19 JAN 2016)
+        # ???
+        # if sa:
+        #     self.sa_pos,self.usa_pos,self.sa_neg,self.usa_neg = self.SpecAst(PSF)
+
+        # if write_path:
+        #     self.file = self.writeSpec(path=write_path)
+
+    # Create normalized 1D PSF in a window from x=300 to x=900 pixels
+    def getPSF(self,range=(300,900)):
+        # PSF is the median of values in the wavelength direction
+        PSF = np.median(self.Order.image_rect[:,range[0]:range[1]],1)
+        #print (PSF.shape)
         npsf = PSF.size
+        # Divide by half the sum of counts (because pos and neg flux each account for half the flux)
         PSF_norm = PSF/PSF[:npsf/2-1].sum()
-        plt.figure()
-        plt.plot(PSF_norm)
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/psf_{}_wave{}.pdf'.format(self.header['DATE-OBS'],self.Order))
-        plt.plot()
-        plt.close()
-        #plt.show(block=False)
+        #print (PSF_norm.shape)
         return PSF_norm
-        
+
+    # Extract 1D spectra using method from Horne1986
     def extract(self,PSF,method='single'):
-        #Placeholder
+        # Placeholders
         pixsig = 1.
+        # Frame size
         sh   = self.sh
         npsf = PSF.size
+
         flux_pos  = np.zeros(sh)
         flux_neg  = np.zeros(sh)
 
@@ -899,81 +1025,42 @@ class Spec1D():
 
         usky_pos  = np.zeros(sh)
         usky_neg  = np.zeros(sh)        
-        
+
+        # Load rectified A-B images
         im = self.Order.image_rect
         uim = self.Order.uimage_rect
         sky = self.Order.sky_rect
         usky = self.Order.usky_rect
-        plt.figure()
-        plt.imshow(self.Order.image_rect)
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/decimage_rect.pdf')
-        plt.close()
-        plt.figure()
-        plt.imshow(self.Order.uimage_rect)
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/decuimage_rect.pdf')
-        plt.close()
-        plt.figure()
-        plt.imshow(self.Order.sky_rect)
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/decsky_rect.pdf')
-        plt.close()
-        plt.figure()
-        plt.imshow(self.Order.usky_rect)
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/decusky_rect.pdf')
-        plt.close()
-        plt.figure()
-        plt.plot(PSF)
-        #plt.show()
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/decPSF.pdf')
-        plt.close()
-#        f, (ax0, ax1, ax2, ax3, ax4, ax5) = plt.subplots(6, sharex=True, sharey=False)
-#        ax0.plot(im[46,:])
-#        ax1.plot(im[47,:])
-#        ax2.plot(im[48,:])
-#        ax3.plot(im[49,:])
-#        ax4.plot(im[50,:])
-#        ax5.plot(im[51,:])
-#        f.savefig('/home/dpiskorz/Desktop/KBandData/decim_trace.pdf')
-#        f, (ax0, ax1, ax2, ax3, ax4, ax5) = plt.subplots(6, sharex=True, sharey=False)
-#        ax0.plot(uim[46,:])
-#        ax1.plot(uim[47,:])
-#        ax2.plot(uim[48,:])
-#        ax3.plot(uim[49,:])
-#        ax4.plot(uim[50,:])
-#        ax5.plot(uim[51,:])
-#        f.savefig('/home/dpiskorz/Desktop/KBandData/decuim_trace.pdf')
+
+        # Iterate over wavelength direction
         for i in np.arange(sh):
             #There is something wrong with the optimal weights here. Will have to check on it later. For 
-            #now, uniform weights make very little difference for high S/N spectra. 
+            #now, uniform weights make very little difference for high S/N spectra.
+
+            # Compute fluxes with optimal extraction algorithm (Horne1986)
             flux_pos[i] = (PSF[:npsf/2-1]*im[:npsf/2-1,i]/uim[:npsf/2-1,i]**2).sum() / (PSF[:npsf/2-1]**2/uim[:npsf/2-1,i]**2).sum()
             flux_neg[i] = (PSF[npsf/2:-1]*im[npsf/2:-1,i]/uim[npsf/2:-1,i]**2).sum() / (PSF[npsf/2:-1]**2/uim[npsf/2:-1,i]**2).sum()
-#            if i == 20 : print PSF[:npsf/2-1]
-#            if i == 20 : print im[:npsf/2-1,i]
-#            if i == 20 : print uim[npsf/2:-1,i]
-#            if i == 20 : print (PSF[npsf/2:-1]*im[npsf/2:-1,i]/uim[npsf/2:-1,i]**2).sum()
-#            if i == 20 : print (PSF[npsf/2:-1]**2/uim[npsf/2:-1,i]**2).sum()
-#            if i == 20 : print flux_pos[i]
             #flux_pos[i] = (PSF[:npsf/2-1]*im[:npsf/2-1,i]).sum() / (PSF[:npsf/2-1]**2).sum()
             #flux_neg[i] = (PSF[npsf/2:-1]*im[npsf/2:-1,i]).sum() / (PSF[npsf/2:-1]**2).sum()
+
+            # Error in fluxes
             uflux_pos[i] = np.sqrt(1.0/(PSF[:npsf/2-1]**2/uim[:npsf/2-1,i]**2.).sum())
             uflux_neg[i] = np.sqrt(1.0/(PSF[npsf/2:-1]**2/uim[npsf/2:-1,i]**2.).sum())
-            
+
+            # Same as above for the sky, but variance is zero (sky assumed to be noise-free)
             sky_pos[i] = (PSF[:npsf/2-1]*sky[:npsf/2-1,i]).sum() / (PSF[:npsf/2-1]**2).sum()
             sky_neg[i] = -(PSF[npsf/2:-1]*sky[npsf/2:-1,i]).sum() / (PSF[npsf/2:-1]**2).sum()
             usky_pos[i] = np.sqrt(1.0/(PSF[:npsf/2-1]**2/usky[:npsf/2-1,i]**2.).sum())
             usky_neg[i] = np.sqrt(1.0/(PSF[npsf/2:-1]**2/usky[npsf/2:-1,i]**2.).sum())
 
-        plt.figure()
-        plt.plot(flux_pos)
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/flux_pos.pdf')
-        plt.close()
-        plt.figure()
-        plt.plot(flux_neg)
-        plt.savefig('/home/'+ user +'/Desktop/LBandData/flux_neg.pdf')
-        plt.close()
+        #print ('PSF and im')
+        # print (PSF[:npsf/2-1])
+        # print (im[:npsf/2-1,512])
+        #
+        # print (PSF[npsf / 2:-1])
+        # print (im[npsf / 2:-1, 512])
+
+        # Fill in faulty value with 1. for fluxes, 1000 for error, so they will have tiny weight
         flux_pos = ma.masked_invalid(flux_pos)
         flux_pos = ma.filled(flux_pos,1.)
         uflux_pos = ma.masked_invalid(uflux_pos)
@@ -991,23 +1078,51 @@ class Spec1D():
         sky_neg = ma.filled(sky_neg,1.)
         usky_neg = ma.masked_invalid(usky_neg)
         usky_neg = ma.filled(usky_neg,1000.)
-        
-#        plt.figure()
-#        plt.plot(flux_pos)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/flux_pos_masked.pdf')
-#        plt.figure()
-#        plt.plot(flux_neg)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/flux_neg_masked.pdf')
-        
+
+        # What is this???
         sky_pos_cont = self._fitCont(self.wave_pos,sky_pos)
         sky_neg_cont = self._fitCont(self.wave_neg,sky_neg)
+
+        # print ('flux_pos')
+        # print (flux_pos.shape)
+        # print ('sky_pos')
+        # print (sky_pos.shape)
+
+        time = self.header['UTC']
+        time = time.replace(':', '')
+        time = time[0:4]
+        date = self.header['DATE-OBS']
+        date = date.replace('-', '')
+        object = self.header['OBJECT']
+        object = object.replace(' ', '')
+
+        # Plot positive flux with initial wavelength guess
+        plt.plot(self.wave_pos, flux_pos, drawstyle ='steps-mid',label='Pos flux w/ initial wavelength fit')
+        plt.plot(self.wave_pos, sky_pos, drawstyle='steps-mid', label='Pos sky w/ initial wavelength fit')
+        plt.legend(loc='upper left')
+        filename = self.writepath + '/' + object + '_' + date + '_' + time + '_spec1d' + str(self.onum) + '_pos' + '.png'
+        print (filename)
+        plt.savefig(filename)
+        plt.close()
+
+        plt.plot(self.wave_neg, flux_neg, drawstyle='steps-mid', label='Neg flux w/ initial wavelength fit')
+        plt.plot(self.wave_neg, sky_neg, drawstyle='steps-mid', label='Neg sky w/ initial wavelength fit')
+        plt.legend(loc='upper left')
+        filename = self.writepath + '/' + object + '_' + date + '_' + time + '_spec1d' + str(
+            self.onum) + '_neg' + '.png'
+        print (filename)
+        plt.savefig(filename)
+        plt.close()
+
+        # Why is sky_pos_cont subtracted??? why is nothing subtracted for flux_pos?
         return flux_pos,uflux_pos,flux_neg,uflux_neg,sky_pos-sky_pos_cont,sky_neg-sky_neg_cont,usky_pos,usky_neg
-        
+
+    #
     def _fitCont(self,wave,spec):
         bg_temp = 210. #K
         
         niter = 2
-        
+
         cont = self.bb(wave*1e-6,bg_temp)
         #print ('cont')
         #print (cont)
@@ -1017,18 +1132,23 @@ class Spec1D():
             print ('norm')
             print (norm)
             norm_cont = np.median(cont[gsubs])
-            cont *= norm/norm_cont 
+            # normalize by specific intensity from a BB continuum?
+            cont *= norm/norm_cont
             gsubs = np.where(spec<cont)
 
         return cont
-        
+
+    # Computes specific intensity: intensity at each wavelength
     def bb(self,wave,T):
+        # speed of light
         cc = constants.c
+        # Planck constant
         hh = constants.h
+        # Boltzmann constant
         kk = constants.k
         
         blambda = 2.*hh*cc**2/(wave**5*(np.exp(hh*cc/(wave*kk*T))-1.))
-        
+
         return blambda
         
 
@@ -1047,7 +1167,7 @@ class Spec1D():
         aper_corr = 1.4
         posloc = np.argmax(PSF)
         negloc = np.argmin(PSF)
-        
+
         sa_pos = np.zeros(self.sh)
         sa_neg = np.zeros(self.sh)
 
@@ -1056,25 +1176,14 @@ class Spec1D():
 
         im = self.Order.image_rect
         uim = self.Order.uimage_rect
-        
-        print "posloc", posloc
-        print "negloc", negloc
-        print np.shape(im)
 
         for i in np.arange(self.sh):
             index = np.arange(width*2+1)-width
 
             # First calculate SUM_i(F_i)
-            #print "posloc", posloc,width
-            #print type(im)
-            #print np.shape(im)
-            #print i
             F_pos = (im[posloc-width:posloc+width+1,i]).sum() 
-            #print "negloc", negloc,width
             F_neg = (im[negloc-width:negloc+width+1,i]).sum()
             #print index, negloc, width, i, np.shape(im)
-            #print im[posloc-width:posloc+width+1,i]
-            #print im[negloc-width:negloc+width+1,i]
             # then SUM_i(i*F_i)
             iF_pos = (index*im[posloc-width:posloc+width+1,i]).sum()
             iF_neg = (index*im[negloc-width:negloc+width+1,i]).sum()
@@ -1091,32 +1200,20 @@ class Spec1D():
         #NIRSPEC flips the spectrum on the detector (as all echelles do).
         sa_pos[i] = -sa_pos[i]
         sa_neg[i] = -sa_neg[i]
-        
-#        plt.figure()
-#        plt.plot(index)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_index.pdf')
-#        plt.figure()
-#        plt.plot(F_pos)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_F_pos.pdf')
-#        plt.figure()
-#        plt.plot(iF_pos)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_if_pos.pdf')
-#        plt.figure()
-#        plt.plot(sa_pos)
-#        plt.savefig('/home/dpiskorz/Desktop/KBandData/sa_pos.pdf')
 
         return sa_pos*aper_corr,usa_pos*aper_corr,sa_neg*aper_corr,usa_neg*aper_corr
 
-    def plot(self):        
+    def plot(self):
         plt.plot(self.wave,self.flux_pos,drawstyle='steps-mid')
         plt.plot(self.wave,self.flux_neg,drawstyle='steps-mid')
-        #plt.show()
+        plt.show()
 
     def plotSA(self):
         plt.plot(self.wave,self.sa_pos,drawstyle='steps-mid')
         plt.plot(self.wave,self.sa_neg,drawstyle='steps-mid')
-        #plt.show()
+        plt.show()
 
+    # what are the ABC ranges???
     def waveGuess(self,beam='pos'):
         wrange = self.Envi.getWaveRange(self.setting,self.onum)
         index = np.arange(self.sh)
@@ -1154,6 +1251,7 @@ class Spec1D():
         else:
             coldefs = pf.ColDefs([c1,c2,c3,c4,c7,c8,c9,c10,c11,c12])
 
+        #tbhdu = pf.new_table(coldefs)
         tbhdu = pf.BinTableHDU.from_columns(coldefs)
 
         self.header['SETNAME'] = (self.setting, 'Setting name')
@@ -1187,10 +1285,11 @@ class Spec1D():
             filename = path+'/'+object+'_'+date+'_'+time+'_spec1d'+str(self.onum)+'.fits'
 
         
-        thdulist.writeto(filename,overwrite=True)
+        thdulist.writeto(filename,clobber=True)
 
         return filename
 
+## Class to calibrate wavelength using rfm
 class WaveCal():
     
     def __init__(self,specfile,path='./',am=1., hp=True):
@@ -1212,7 +1311,7 @@ class WaveCal():
         filename = filename[0:length-12]
         filename = filename+'wave'+onum+'.fits'
         fullpath = self.path+'/'+filename
-        spec1d.writeto(fullpath,overwrite=True)
+        spec1d.writeto(fullpath,clobber=True)
         
         return fullpath
         
@@ -1224,26 +1323,24 @@ class WaveCal():
         plt.close()
 
         trans = self.WavePos.getModel()
-        '''
         plt.figure(self.specfile+' (Pos)')
-        plt.plot(trans['wave'],trans['Radiance'])
-        plt.plot(trans['wave'],trans['sky'])
+        plt.plot(trans['wave'],trans['Radiance'],label='radiance')
+        plt.plot(trans['wave'],trans['sky'],label='sky')
+        plt.legend(loc='upper left')
         if (hp == True):
             plt.show()
         else:
             plt.show(block=False)
-		'''
-		
+
         trans = self.WaveNeg.getModel()
-        '''
         plt.figure(self.specfile+' (Neg)')
-        plt.plot(trans['wave'],trans['Radiance'])
-        plt.plot(trans['wave'],trans['sky'])
+        plt.plot(trans['wave'],trans['Radiance'],label='radiance')
+        plt.plot(trans['wave'],trans['sky'],label='sky')
+        plt.legend(loc='upper left')
         if (hp == True):
             plt.show()
         else:
             plt.show(block=False)
-		'''
 
 class CalSpec():
     def __init__(self,scifile,stdfile,shift=0.,dtau=0.0,dowave=True,write_path=None,order=0):
@@ -1279,6 +1376,7 @@ class CalSpec():
         nx = spec.size
         index = np.arange(nx)
         return np.interp(index-shift,index,spec)
+    #
     def _normalize(self,Spec):
         niter = 3
         
@@ -1339,7 +1437,9 @@ class CalSpec():
 
         coldefs = pf.ColDefs([c1,c2,c3,c4,c5])
 
+        #tbhdu = pf.new_table(coldefs)
         tbhdu = pf.BinTableHDU.from_columns(coldefs)
+
         hdu = pf.PrimaryHDU(header=self.header)
         thdulist = pf.HDUList([hdu,tbhdu])
 
@@ -1347,22 +1447,22 @@ class CalSpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_calspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,overwrite=True)
+        thdulist.writeto(filename,clobber=True)
 
         return filename
 
     def plotBeams(self):
         plt.plot(self.wave_pos,self.flux_pos)
         plt.plot(self.wave_neg,self.flux_neg)
-        #plt.show()
+        plt.show()
 
     def plotFlux(self):
         plt.plot(self.wave,self.flux,drawstyle='steps-mid')
-        #plt.show()
+        plt.show()
 
     def plotSA(self):
         plt.plot(self.wave,self.sa,drawstyle='steps-mid')
-        #plt.show()
+        plt.show()
 
 class SASpec():
     def __init__(self, SA_ortho_file, SA_para_file, write_path=None,order=1):
@@ -1401,6 +1501,7 @@ class SASpec():
 
         coldefs = pf.ColDefs([c1,c2,c3,c4,c5])
 
+        #tbhdu = pf.new_table(coldefs)
         tbhdu = pf.BinTableHDU.from_columns(coldefs)
         hdu = pf.PrimaryHDU()
         thdulist = pf.HDUList([hdu,tbhdu])
@@ -1409,7 +1510,7 @@ class SASpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_saspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,overwrite=True)
+        thdulist.writeto(filename,clobber=True)
 
         return filename
 
@@ -1424,82 +1525,134 @@ class SASpec():
 # NRC (19 JUNE 2014) - ADDED AN ARGUMENT 'hold_plots' TO THE Reduction AND SAReduction CLASSES SO THAT WHEN SET TO
 # True THE PIPELINE WILL NOT BE STOPPED BY THE WAVELENGTH CALIBRATION PLOTS.
 
+
 class Reduction():
     '''
     Top level basic script for reducing an observation, consisting of a science target and a telluric standard, as well
-    as associated calibration files. 
+    as associated calibration files. Output is saved in ../pynirspec-out/ut-date/target-name/
     '''
+
+    # initialize file paths and configuration variables
     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
                  sci_range=None, std_range=None, path=None, base=None,level1=True,level2=True,
-                 level1_path='L1FILES',shift=0.0, dtau=0.0, save_dark=False, save_flat=False, SettingsFile=None,
-                 sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+                 shift=0.0, dtau=0.0, save_dark=True, save_flat=True, SettingsFile=None,
+                 ut_date = None, sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
 
         if (hold == False):
             hold_plots = False
 
+        # Save date and target name for later
+        self.ut_date = ut_date
+        self.sci_tname = sci_tname
+
+        # Whether to save processed darks and flats
         self.save_dark = save_dark
         self.save_flat = save_flat
 
+        # Range of science images
         sci_range1 = sci_range
-        self.shift       = shift
-        self.dtau        = dtau
-        self.level1_path = level1_path
 
+        # ???
+        self.shift = shift
+        self.dtau = dtau
+
+        # Path to save Level1 .json file: a summary of L1 output paths
+
+        date_dir = '../pynirspec-out/'+self.ut_date+'/'
+        if not os.path.exists(date_dir):
+            os.mkdir(date_dir)
+        out_dir = date_dir+self.sci_tname+'/'
+        if not os.path.exists(out_dir):
+            os.mkdir(out_dir)
+
+        self.level1_path = out_dir+'L1FILES'
+        self.spec2d_path = out_dir+'SPEC2D'
+        self.spec1d_path = out_dir+'SPEC1D'
+        self.wave_path = out_dir+'WAVE'
+        self.cal1d_path = out_dir+'CAL1D'
+        out_path_list = [self.level1_path, self.spec2d_path, self.spec1d_path, self.wave_path, self.cal1d_path]
+
+        # Create output directories if they do not exist
+        for out_path in out_path_list:
+            if not os.path.exists(out_path):
+                os.mkdir(out_path)
+
+        # Path to .ini file containing instrument settings and details of the spectral orders etc.
         self.SettingsFile = SettingsFile
 
+        # Create lists of file names for each file type
         self.flat_dark_names = makeFilelist(base,flat_dark_range,path=path)
         self.obs_dark_names  = makeFilelist(base,dark_range,path=path)
-        self.flat_names      = makeFilelist(base,flat_range,path=path)
-        self.sci_names1      = makeFilelist(base,sci_range1,path=path)
-        self.std_names       = makeFilelist(base,std_range,path=path)
+        self.flat_names = makeFilelist(base,flat_range,path=path)
+        self.sci_names1 = makeFilelist(base,sci_range1,path=path)
+        self.std_names = makeFilelist(base,std_range,path=path)
 
+        # ???
         self.mode  = 'SciStd'
+
+        # Dict for the data files
         self.tdict = {'science':self.sci_names1} #,'standard':self.std_names}
+        # Dict for target names
         self.ndict = {'science':sci_tname}#, 'standard':std_tname}
+
+        # To hold off showing plots in wavelength calibration so that code continues to run
         self.hold_plots = hold_plots
 
+        # Whether to run Level1 steps
         if level1:
             self._level1()
 
+        # Whether to run Level2 steps
         if level2:
             self._level2()
 
+    ## Level 1 processing, includes dark subtraction, bad pixel map, flat-fielding ...
     def _level1(self):
-		FDark = Dark(self.flat_dark_names)
-		ODark = Dark(self.obs_dark_names,save=self.save_dark)
-		OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile)
-        
-		level1_files = {}
-		for key in self.tdict.keys():
-			ONod    = Nod(self.tdict[key],flat=OFlat,dark=ODark, tname=self.ndict[key], SettingsFile=self.SettingsFile) 
-			norders = ONod.getNOrders()
-			target_files = []
-			for i in np.arange(norders):
-				#if i == 0: continue					### if i == 0: continue, skips 0
-				#if i == 1: continue
-				#if i == 4: continue
-				#if i == 2: continue
-				print '### Processing order', i+1
-				OOrder   = Order(ONod,onum=i+1,write_path='SPEC2D')
-				print OOrder.fitTrace(OOrder.image1, 1)
-				#plt.figure()
-				#plt.imshow(OOrder.uimage1, hold=True)
-				#plt.show()
-				#plt.figure()
-				#plt.imshow(OOrder.uimage_rect, hold=True)
-				#plt.show()
-				print '### 2D order extracted'
-				OSpec1D  = Spec1D(OOrder,sa=True,write_path='SPEC1D')
-				OWaveCal = WaveCal(OSpec1D.file,path='WAVE',am=OSpec1D.airmass, hp=self.hold_plots)
-				OOrder_files = {'2d':OOrder.file, '1d':OSpec1D.file, 'wave':OWaveCal.file}
-				target_files.append(OOrder_files)
-                
-			level1_files[key] = target_files
-		
-		filename = self._getLevel1File(self.ndict['science']) 
-		f = open(self.level1_path+'/'+filename, 'w')
-		json.dump(level1_files,f)
-		f.close()
+
+        # Create flat dark
+        FDark = Dark(self.flat_dark_names,ut_date=self.ut_date,sci_tname=self.sci_tname)
+        # Create observation dark
+        ODark = Dark(self.obs_dark_names,save=self.save_dark,ut_date=self.ut_date,sci_tname=self.sci_tname)
+        # Create flats
+        OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile,ut_date=self.ut_date,sci_tname=self.sci_tname)
+
+        img_flat = self.save_flat
+
+        # Initialize dictionary for level1 files
+        level1_files = {}
+        #print (self.tdict)
+        # Iterate over observation types (only science for now)
+        for key in self.tdict.keys():
+            #print (key)
+            ONod    = Nod(self.tdict[key],flat=OFlat,dark=ODark, tname=self.ndict[key], SettingsFile=self.SettingsFile,
+                          badpix='../pynirspec-out/'+self.ut_date+'/'+self.sci_tname+'/badpix.dmp')
+          
+            matrix = ONod.TargetStack
+
+            # Number of spectral orders
+            norders = ONod.getNOrders()
+            target_files = []
+            # Process each order separately
+            for i in np.arange(norders):
+                print '### Processing order',i+1
+                # Shift A-B images, combine them, and rectify combined A-B image
+                OOrder   = Order(ONod,onum=i+1,write_path=self.spec2d_path)
+                print '### 2D order extracted'
+                #
+                OSpec1D  = Spec1D(OOrder,sa=True,write_path=self.spec1d_path)
+
+                # Omit -- we will do wavelength calibration differently
+                # OWaveCal = WaveCal(OSpec1D.file,path=self.wave_path,am=OSpec1D.airmass, hp=self.hold_plots)
+                OOrder_files = {'2d':OOrder.file} #,'1d':OSpec1D.file, 'wave':OWaveCal.file}
+                target_files.append(OOrder_files)
+
+            level1_files[key] = target_files
+
+        filename = self._getLevel1File(self.ndict['science']) 
+ 
+        f = open(self.level1_path+'/'+filename, 'w')
+        json.dump(level1_files,f)
+        f.close()
 
     def _level2(self):
 
@@ -1513,7 +1666,7 @@ class Reduction():
         for i in np.arange(norders):
             sci_file = level1_files['science'][i]['wave']
             std_file = level1_files['standard'][i]['wave']
-            OCalSpec = CalSpec(sci_file,std_file,shift=self.shift,dtau=self.dtau,write_path='CAL1D',order=i+1)
+            OCalSpec = CalSpec(sci_file,std_file,shift=self.shift,dtau=self.dtau,write_path=self.cal1d_path,order=i+1)
 
 
     def _getLevel1File(self, tname):
@@ -1524,67 +1677,76 @@ class Reduction():
         filename = basename+'_files.json'
         return filename
 
-class SAReduction(Reduction):
-    def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
-                 sci_range1=None, sci_range2=None, std_range=None, path=None, base=None,
-                 level1_path='L1FILES', shift1=0.0, dtau1=0.0, shift2=0.0, dtau2=0.0,
-                 level1=True, level2=True, save_dark=False, save_flat=False, SettingsFile=None,
-                 sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+# class SAReduction(Reduction):
+#     #def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
+#                  #sci_range1=None, sci_range2=None, std_range=None, path=None, base=None,
+#                  #level1_path='../pynirspec-out/L1FILES', shift1=0.0, dtau1=0.0, shift2=0.0, dtau2=0.0,
+#                  #level1=True, level2=True, save_dark=False, save_flat=False, SettingsFile=None,
+#                  #sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+#
+#     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
+#                  sci_range=None, std_range=None, path=None, base=None,
+#                  level1_path='../pynirspec-out/L1FILES', shift=0.0, dtau=0.0,
+#                  level1=True, level2=True, save_dark=True, save_flat=True, SettingsFile=None,
+#                  sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+#
+#         if (hold == False):
+#             hold_plots = False
+#
+#         self.save_dark = save_dark
+#         self.save_flat = save_flat
+#
+#
+#         self.shift = shift
+#         self.dtau = dtau
+#
+#         self.level1_path = level1_path
+#
+#         self.SettingsFile = SettingsFile
+#
+#         self.flat_dark_names = makeFilelist(base,flat_dark_range,path=path)
+#         self.obs_dark_names  = makeFilelist(base,dark_range,path=path)
+#         self.flat_names      = makeFilelist(base,flat_range,path=path)
+#         self.sci_names      = makeFilelist(base,sci_range,path=path)
+#       #  self.sci_names2      = makeFilelist(base,sci_range2,path=path)
+#         self.std_names       = makeFilelist(base,std_range,path=path)
+#
+#         self.mode  = 'SA'
+#         #self.tdict = {'science':self.sci_names1,'anti_science':self.sci_names2,'standard':self.std_names}
+#         #self.ndict = {'science':sci_tname, 'anti_science':sci_tname, 'standard':std_tname}
+#         self.tdict = {'science':self.sci_names,'standard':self.std_names}
+#         self.ndict = {'science':sci_tname,'standard':std_tname}
+#         self.hold_plots = hold_plots
+#
+#         if level1:
+#             self._level1()
+#
+#         if level2:
+#             self._level2()
+#
+#     def _level2(self):
+#         filename = self._getLevel1File(self.ndict['science'])
+#         f = open(self.level1_path+'/'+filename, 'r')
+#         level1_files = json.load(f)
+#         f.close()
+#
+#         norders = len(level1_files['science'])
+#
+#         for i in np.arange(norders):
+#             sci_file  = level1_files['science'][i]['wave']
+#             asci_file = level1_files['anti_science'][i]['wave']
+#             std_file  = level1_files['standard'][i]['wave']
+#             OCalSpec = CalSpec(sci_file,std_file,shift=self.shift1,dtau=self.dtau1,write_path='../pynirspec-out/CAL1D',order=i+1)
+#             ACalSpec = CalSpec(asci_file,std_file,shift=self.shift2,dtau=self.dtau2,write_path='../pynirspec-out/CAL1D',order=i+1)
+#             OSASpec = SASpec(OCalSpec.file,ACalSpec.file, write_path='../pynirspec-out/SA1D',order=i+1)
 
-        if (hold == False):
-            hold_plots = False
-        
-        self.save_dark = save_dark
-        self.save_flat = save_flat
-        
-        self.shift1 = shift1
-        self.dtau1  = dtau1
-        self.shift2 = shift2
-        self.dtau2  = dtau2
-        
-        self.level1_path = level1_path
-        
-        self.SettingsFile = SettingsFile
-
-        self.flat_dark_names = makeFilelist(base,flat_dark_range,path=path)
-        self.obs_dark_names  = makeFilelist(base,dark_range,path=path)
-        self.flat_names      = makeFilelist(base,flat_range,path=path)
-        self.sci_names1      = makeFilelist(base,sci_range1,path=path)
-        self.sci_names2      = makeFilelist(base,sci_range2,path=path)
-        self.std_names       = makeFilelist(base,std_range,path=path)
-
-        self.mode  = 'SA'
-        self.tdict = {'science':self.sci_names1,'anti_science':self.sci_names2,'standard':self.std_names}
-        self.ndict = {'science':sci_tname, 'anti_science':sci_tname, 'standard':std_tname}
-        self.hold_plots = hold_plots
-
-        if level1:
-            self._level1()
-        
-        if level2:
-            self._level2()
-
-    def _level2(self):   
-        filename = self._getLevel1File(self.ndict['science'])
-        f = open(self.level1_path+'/'+filename, 'r')
-        level1_files = json.load(f)
-        f.close()
-
-        norders = len(level1_files['science'])
-
-        for i in np.arange(norders):
-            sci_file  = level1_files['science'][i]['wave']
-            asci_file = level1_files['anti_science'][i]['wave']
-            std_file  = level1_files['standard'][i]['wave']
-            OCalSpec = CalSpec(sci_file,std_file,shift=self.shift1,dtau=self.dtau1,write_path='CAL1D',order=i+1)
-            ACalSpec = CalSpec(asci_file,std_file,shift=self.shift2,dtau=self.dtau2,write_path='CAL1D',order=i+1)
-            OSASpec = SASpec(OCalSpec.file,ACalSpec.file, write_path='SA1D',order=i+1)
 
 def readFilelist(listfile):
-    funit = open(lisfile)
+    funit = open(listfile)
     flist = funit.readlines()
     return flist
 
+## Create a list of file names for a specific file type (flats, darks etc.)
 def makeFilelist(date,ranges,path=''):
 
     if not isinstance(ranges,list):
@@ -1629,4 +1791,4 @@ def calc_centroid(cc,cwidth=15):
 
 def write_fits(array,filename='test.fits'):
     hdu = pf.PrimaryHDU(array)
-    hdu.writeto(filename,overwrite=True)
+    hdu.writeto(filename,clobber=True)
