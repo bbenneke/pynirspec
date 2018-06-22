@@ -14,11 +14,13 @@ import matplotlib.pylab as plt
 from collections import Counter
 import sys
 import inpaint as inpaint
-import atmopt.rfm_tools as rfm
 import matplotlib.cm as cm
 user = 'pelletier'
 
 
+sys.path.insert(0, '../atmopt')
+import rfm_tools as rfm
+#test
 class Environment():
     '''
     Class to encapsulate global environment parameters.
@@ -40,6 +42,8 @@ class Environment():
     def __init__(self,settings_file=None,detpars_file=None):
 
         sys_dir = self._getSysPath()
+        #print ("sys_dir: " + sys_dir)
+
         self.settings = cp.SafeConfigParser()
         if settings_file is None:
             #use the system settings
@@ -152,9 +156,12 @@ class Observation():
         print self.header['FILENAME']          # Added by Bjorn and Stefan
         try:
             del self.header['GAIN.SPE']
+        except:
+            print ('GAIN.SPE already deleted from hdr.')
+        try:
             del self.header['FREQ.SPE']
         except:
-            print 'Skip deleting header info:', self.header['FILENAME']
+            print ('FREQ.SPE already deleted from hdr.')
 
     def getExpPars(self):
         coadds   = self.getKeyword('COADDS')[0]
@@ -178,12 +185,22 @@ class Observation():
         echelle   = echelle[0]
         crossdisp = crossdisp[0]
 
+        #print ('echelle: ' + str(echelle))
+        #print ('crossdisp: ' + str(crossdisp))
+
         echelles   = self.Envi.getItems('echelle')
         crossdisps = self.Envi.getItems('crossdisp')
 
+        # print (echelles)
+        # print (crossdisps)
+
         setsub1 = [i for i,v in enumerate(echelles) if float(v)==echelle]
+        # print (setsub1)
         setsub2 = [i for i,v in enumerate(crossdisps) if float(v)==crossdisp]
+        # print (setsub2)
         sub = [i for i in setsub1 if i in setsub2]
+        # print (sub)
+        #print (self.Envi.getSections()[sub[0]])
         return self.Envi.getSections()[sub[0]],echelle,crossdisp
 
     def getAirmass(self):
@@ -260,9 +277,15 @@ class Observation():
         masked_stack = ma.masked_invalid(stack)
         masked_ustack = ma.masked_invalid(ustack)
         
+        # print (masked_stack.shape)
+        # print (masked_ustack.shape)
+
         image = ma.average(masked_stack,2,weights=1./masked_ustack**2)
         uimage = np.sqrt(ma.mean(masked_ustack**2,2)/ma.count(masked_ustack,2))
-        
+
+        # print (image.shape)
+        # print (uimage.shape)
+
         return image, uimage
 
     def writeImage(self,filename=None):
@@ -272,7 +295,7 @@ class Observation():
         hdu = pf.PrimaryHDU(self.image.data)
         uhdu = pf.ImageHDU(self.uimage.data)
         hdulist = pf.HDUList([hdu,uhdu])
-        hdulist.writeto(filename,overwrite=True)
+        hdulist.writeto(filename,clobber=True)
 
     def getKeyword(self,keyword):
         try:
@@ -621,7 +644,28 @@ class Order():
 
         self.sky_rect[ssubs]  = beamSkyRect[1][ssubs]
         self.usky_rect[ssubs] = beamUSkyRect[1][ssubs]
-        
+
+        # plt.imshow(self.sky_rect, cmap='gray')
+        # plt.colorbar()
+        # plt.text(30, 30, 'sky rect final')
+        # plt.show()
+        # #t.sleep(5)
+        # plt.close()
+
+        # plt.imshow(self.image_rect, cmap='gray')
+        # plt.colorbar()
+        # plt.text(30, 30, 'SPEC 2D')
+        # plt.show()
+        # #t.sleep(5)
+        # plt.close()
+
+        # plt.imshow(self.uimage_rect, cmap='gray')
+        # plt.colorbar()
+        # plt.text(30, 30, 'SPEC 2D errors')
+        # plt.show()
+        # #t.sleep(5)
+        # plt.close()
+
         if write_path:
             self.file = self.writeImage(path=write_path)
 
@@ -762,8 +806,12 @@ class Order():
         
         
     def _subMedian(self):
+        #print (self.image_rect[:,500])
+        #print (np.median(self.image_rect, axis=0)[500])
         self.image_rect = self.image_rect-np.median(self.image_rect,axis=0)
-            
+        #print ((self.image_rect).shape)
+        #print (self.image_rect[:,500])
+
     def writeImage(self,filename=None,path='.'):
 
         if filename is None:
@@ -782,6 +830,9 @@ class Order():
         sky_hdu = pf.ImageHDU(self.sky_rect)
         usky_hdu = pf.ImageHDU(self.usky_rect)
         
+
+        #print (type(hdu.data))
+
         hdu.header['SETNAME'] = (self.setting, 'Setting name')
         hdu.header['ECHLPOS'] = (self.echelle, 'Echelle position')
         hdu.header['DISPPOS'] = (self.crossdisp, 'Cross disperser position')
@@ -958,9 +1009,13 @@ class Spec1D():
         niter = 2
         
         cont = self.bb(wave*1e-6,bg_temp)
+        #print ('cont')
+        #print (cont)
         gsubs = np.where(np.isfinite(spec))
         for i in range(niter):
             norm = np.median(spec[gsubs])
+            print ('norm')
+            print (norm)
             norm_cont = np.median(cont[gsubs])
             cont *= norm/norm_cont 
             gsubs = np.where(spec<cont)
@@ -1224,7 +1279,6 @@ class CalSpec():
         nx = spec.size
         index = np.arange(nx)
         return np.interp(index-shift,index,spec)
-
     def _normalize(self,Spec):
         niter = 3
         
