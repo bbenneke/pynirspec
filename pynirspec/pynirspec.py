@@ -2,7 +2,6 @@ import warnings
 import json
 import os
 import ConfigParser as cp
-import time as t
 
 import numpy as np
 import numpy.ma as ma
@@ -15,10 +14,7 @@ import matplotlib.pylab as plt
 from collections import Counter
 import sys
 import inpaint as inpaint
-import matplotlib.cm as cm
-sys.path.insert(0, '../atmopt')
-import rfm_tools as rfm
-#test
+
 class Environment():
     '''
     Class to encapsulate global environment parameters.
@@ -128,14 +124,15 @@ class Observation():
     writeImage
    
     '''
-    def __init__(self,filelist,type='image', SettingsFile=None,tname=None,ut_date=None):
+    def __init__(self,filelist,type='image', SettingsFile=None,
+                 tname=None,out_dir=None):
         self.type = type
         self.Envi = Environment(settings_file=SettingsFile)
         self.flist = filelist
         self._openList(tname)
         self._makeHeader(tname)
-        self.ut_date = ut_date
         self.sci_tname = tname
+        self.output_path = out_dir
 
     # Open the files and get exp and det parameters from header and .ini file respectively
     def _openList(self, tname):
@@ -336,10 +333,10 @@ class Observation():
 
 ## Flat class, extends the class Observation
 class Flat(Observation):
-    def __init__(self,filelist,dark=None,norm_thres=5000.,save=False,ut_date=None,sci_tname=None,**kwargs):
+    def __init__(self,filelist,dark=None,norm_thres=5000.,save=False,sci_tname=None,out_dir=None,**kwargs):
 
         # Inherits __init__ function from Observation class
-        Observation.__init__(self,filelist,ut_date=ut_date,tname=sci_tname,**kwargs)
+        Observation.__init__(self,filelist,tname=sci_tname,out_dir=out_dir,**kwargs)
         self.type = 'flat'
         # Convert images to units of e- count
         self.stack,self.ustack = self._getStack()
@@ -351,6 +348,7 @@ class Flat(Observation):
         self.setting,self.echelle,self.crossdisp = self.getSetting()
         # Combine flats through a weighted average
         self.image,self.uimage = self._collapseStack()
+        self.out_dir = out_dir
 
         # Whether to subtract flat darks from flats
         if dark:
@@ -361,7 +359,7 @@ class Flat(Observation):
         # Where the flat field is faulty, it's set to 1 to avoid divide by zeros.
         self.image[np.where(self.image<0.1)] = 1
         if save:
-            self.writeImage(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/' + self.type + '.fits')
+            self.writeImage(filename=self.out_dir + self.type + '.fits')
 
     # Normalize flats with median value (larger than a given threshold)
     def _normalize(self,norm_thres):
@@ -374,10 +372,11 @@ class Flat(Observation):
 
 ## Dark class, extends the class Observation
 class Dark(Observation):
-    def __init__(self,filelist,save=False,ut_date=None,sci_tname=None,**kwargs):
+    def __init__(self,filelist,save=False,sci_tname=None,out_dir=None,**kwargs):
         # Inherits __init__ function from Observation class
-        Observation.__init__(self,filelist,ut_date=ut_date,tname=sci_tname,**kwargs)
+        Observation.__init__(self,filelist,tname=sci_tname,out_dir=out_dir,**kwargs)
         self.type = 'dark'
+        self.out_dir = out_dir
         # Convert images to units of e- count
         self.stack,self.ustack = self._getStack()
         # Number of darks
@@ -387,10 +386,10 @@ class Dark(Observation):
         # Combine darks using a weighted average
         self.image,self.uimage = self._collapseStack()
         # Make bad pixel map (see function below)
-        self._badPixMap(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/badpix.dmp')
+        self._badPixMap(filename=self.out_dir + '/badpix.dmp')
         # Whether to save combined dark frame
         if save:
-            self.writeImage(filename='../pynirspec-out/' + self.ut_date + '/' + self.sci_tname + '/' + self.type + '.fits')
+            self.writeImage(filename=self.out_dir + self.type + '.fits')
 
     # Create bad pixel map
     def _badPixMap(self,clip=30,filename='badpix.dmp'):
@@ -406,16 +405,17 @@ class Dark(Observation):
 
 ## Class for science images (both A and B nods). Prepares A-B images, as well as a sky image
 class Nod(Observation):
-    def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',**kwargs):
+    def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',plots_dir=None,**kwargs):
 
         # Inherits Observation
-        Observation.__init__(self,filelist,**kwargs)
+        Observation.__init__(self,filelist,out_dir=out_dir,**kwargs)
         self.type = 'nod'                
         self.setting,self.echelle,self.crossdisp = self.getSetting()
         # Get list of airmasses through the science sequence
         self.airmasses = self.getAirmass()
         # Mean airmass
         self.airmass = np.mean(self.airmasses)
+        self.plots_dir = plots_dir
 
         # List of RA, DEC, and file numbers for science images
         RAs  = self.getKeyword('RA')
@@ -434,7 +434,7 @@ class Nod(Observation):
         plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
         plt.colorbar()
         plt.text(100, 100, '1 A-B BEFORE dividing by flat & bp correction')
-        plt.savefig('../pynirspec-out/2017_11_03/sample-A_B-before-flattening.png')
+        plt.savefig(self.plots_dir+'sample-A_B-before-flattening.png')
 
         # Divide by normalized flats
         if flat:
@@ -446,10 +446,9 @@ class Nod(Observation):
 
         plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
         plt.colorbar()
-        plt.text(100, 100, '1 A-B AFTER dividing by flat & bp correction')
-        plt.savefig('../pynirspec-out/2017_11_03/sample-A_B-after-flattening.png')
-        # t.sleep(5)
-        #plt.close()
+        plt.text(100, 100, '1 A-B image AFTER dividing by flat & bp correction')
+        plt.savefig(self.plots_dir+'sample-A_B-after-flattening.png')
+
 
        # Reassign variable names for A-B images
         self.TargetStack, self.UTargetStack = self.stack, self.ustack
@@ -475,7 +474,7 @@ class Nod(Observation):
                 plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
                 plt.colorbar()
                 plt.text(100, 100, '1 nod BEFORE dividing by flat & bp correction')
-                plt.savefig('../pynirspec-out/2017_11_03/sample-Anod-before-flattening.png')
+                plt.savefig(self.plots_dir+'sample-Anod-before-flattening.png')
 
             if flat:
                 self.divideInStack(flat)
@@ -489,7 +488,7 @@ class Nod(Observation):
                 plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
                 plt.colorbar()
                 plt.text(100, 100, '1 nod AFTER dividing by flat & bp correction')
-                plt.savefig('../pynirspec-out/2017_11_03/sample-Anod-after-flattening.png')
+                plt.savefig(self.plots_dir+'sample-Anod-after-flattening.png')
 
 
             beam_sky_stacks.append(self.stack)
@@ -738,8 +737,6 @@ class Order():
         # plt.colorbar()
         # plt.text(30, 30, 'sky rect initial')
         # plt.show()
-        # #t.sleep(5)
-        # plt.close()
 
         ## These lines create the sky! This is done by using values from both the A and B image
         ## Specifically, (B-A) image is made, and where the counts are < 2*error,
@@ -752,22 +749,16 @@ class Order():
         # plt.colorbar()
         # plt.text(30, 30, 'sky rect final')
         # plt.show()
-        # #t.sleep(5)
-        # plt.close()
 
         # plt.imshow(self.image_rect, cmap='gray')
         # plt.colorbar()
         # plt.text(30, 30, 'SPEC 2D')
         # plt.show()
-        # #t.sleep(5)
-        # plt.close()
 
         # plt.imshow(self.uimage_rect, cmap='gray')
         # plt.colorbar()
         # plt.text(30, 30, 'SPEC 2D errors')
         # plt.show()
-        # #t.sleep(5)
-        # plt.close()
 
         if write_path:
             self.file = self.writeImage(path=write_path)
@@ -870,6 +861,7 @@ class Order():
         centroids = []
         totals = []
         # Iterate over each col (wavelength direction)
+        # Check
         for i in np.arange(sh[1]):
             col_med = np.median(image[yindex,i])
             total = np.abs((image[yindex,i]-col_med).sum())
@@ -1525,16 +1517,15 @@ class SASpec():
 # NRC (19 JUNE 2014) - ADDED AN ARGUMENT 'hold_plots' TO THE Reduction AND SAReduction CLASSES SO THAT WHEN SET TO
 # True THE PIPELINE WILL NOT BE STOPPED BY THE WAVELENGTH CALIBRATION PLOTS.
 
-
 class Reduction():
     '''
     Top level basic script for reducing an observation, consisting of a science target and a telluric standard, as well
-    as associated calibration files. Output is saved in ../pynirspec-out/ut-date/target-name/
+    as associated calibration files. Output is saved in ../../NAME OF OUTPUT DIR/ut-date/target-name/
     '''
 
     # initialize file paths and configuration variables
     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
-                 sci_range=None, std_range=None, path=None, base=None,level1=True,level2=True,
+                 sci_range=None, std_range=None, path=None, output_path = None, base=None,level1=True,level2=True,
                  shift=0.0, dtau=0.0, save_dark=True, save_flat=True, SettingsFile=None,
                  ut_date = None, sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
 
@@ -1544,7 +1535,7 @@ class Reduction():
         # Save date and target name for later
         self.ut_date = ut_date
         self.sci_tname = sci_tname
-
+        self.output_path = output_path
         # Whether to save processed darks and flats
         self.save_dark = save_dark
         self.save_flat = save_flat
@@ -1558,19 +1549,24 @@ class Reduction():
 
         # Path to save Level1 .json file: a summary of L1 output paths
 
-        date_dir = '../pynirspec-out/'+self.ut_date+'/'
+        date_dir = self.output_path+self.ut_date+'/'
         if not os.path.exists(date_dir):
             os.mkdir(date_dir)
         out_dir = date_dir+self.sci_tname+'/'
         if not os.path.exists(out_dir):
             os.mkdir(out_dir)
 
+        self.out_dir = out_dir
+
         self.level1_path = out_dir+'L1FILES'
         self.spec2d_path = out_dir+'SPEC2D'
         self.spec1d_path = out_dir+'SPEC1D'
         self.wave_path = out_dir+'WAVE'
         self.cal1d_path = out_dir+'CAL1D'
-        out_path_list = [self.level1_path, self.spec2d_path, self.spec1d_path, self.wave_path, self.cal1d_path]
+        self.plots_path = out_dir+'PLOTS'
+
+        out_path_list = [self.level1_path, self.spec2d_path, self.spec1d_path,
+                         self.wave_path, self.cal1d_path, self.plots_path]
 
         # Create output directories if they do not exist
         for out_path in out_path_list:
@@ -1610,11 +1606,11 @@ class Reduction():
     def _level1(self):
 
         # Create flat dark
-        FDark = Dark(self.flat_dark_names,ut_date=self.ut_date,sci_tname=self.sci_tname)
+        FDark = Dark(self.flat_dark_names,sci_tname=self.sci_tname,out_dir=self.out_dir)
         # Create observation dark
-        ODark = Dark(self.obs_dark_names,save=self.save_dark,ut_date=self.ut_date,sci_tname=self.sci_tname)
+        ODark = Dark(self.obs_dark_names,save=self.save_dark,sci_tname=self.sci_tname,out_dir=self.out_dir)
         # Create flats
-        OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile,ut_date=self.ut_date,sci_tname=self.sci_tname)
+        OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile,sci_tname=self.sci_tname,out_dir=self.out_dir)
 
         img_flat = self.save_flat
 
@@ -1625,7 +1621,7 @@ class Reduction():
         for key in self.tdict.keys():
             #print (key)
             ONod    = Nod(self.tdict[key],flat=OFlat,dark=ODark, tname=self.ndict[key], SettingsFile=self.SettingsFile,
-                          badpix='../pynirspec-out/'+self.ut_date+'/'+self.sci_tname+'/badpix.dmp')
+                          plots_dir = self.plots_path, badpix=self.out_dir+'/badpix.dmp')
           
             matrix = ONod.TargetStack
 
@@ -1676,70 +1672,6 @@ class Reduction():
         basename = getBaseName(header, tname)
         filename = basename+'_files.json'
         return filename
-
-# class SAReduction(Reduction):
-#     #def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
-#                  #sci_range1=None, sci_range2=None, std_range=None, path=None, base=None,
-#                  #level1_path='../pynirspec-out/L1FILES', shift1=0.0, dtau1=0.0, shift2=0.0, dtau2=0.0,
-#                  #level1=True, level2=True, save_dark=False, save_flat=False, SettingsFile=None,
-#                  #sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
-#
-#     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
-#                  sci_range=None, std_range=None, path=None, base=None,
-#                  level1_path='../pynirspec-out/L1FILES', shift=0.0, dtau=0.0,
-#                  level1=True, level2=True, save_dark=True, save_flat=True, SettingsFile=None,
-#                  sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
-#
-#         if (hold == False):
-#             hold_plots = False
-#
-#         self.save_dark = save_dark
-#         self.save_flat = save_flat
-#
-#
-#         self.shift = shift
-#         self.dtau = dtau
-#
-#         self.level1_path = level1_path
-#
-#         self.SettingsFile = SettingsFile
-#
-#         self.flat_dark_names = makeFilelist(base,flat_dark_range,path=path)
-#         self.obs_dark_names  = makeFilelist(base,dark_range,path=path)
-#         self.flat_names      = makeFilelist(base,flat_range,path=path)
-#         self.sci_names      = makeFilelist(base,sci_range,path=path)
-#       #  self.sci_names2      = makeFilelist(base,sci_range2,path=path)
-#         self.std_names       = makeFilelist(base,std_range,path=path)
-#
-#         self.mode  = 'SA'
-#         #self.tdict = {'science':self.sci_names1,'anti_science':self.sci_names2,'standard':self.std_names}
-#         #self.ndict = {'science':sci_tname, 'anti_science':sci_tname, 'standard':std_tname}
-#         self.tdict = {'science':self.sci_names,'standard':self.std_names}
-#         self.ndict = {'science':sci_tname,'standard':std_tname}
-#         self.hold_plots = hold_plots
-#
-#         if level1:
-#             self._level1()
-#
-#         if level2:
-#             self._level2()
-#
-#     def _level2(self):
-#         filename = self._getLevel1File(self.ndict['science'])
-#         f = open(self.level1_path+'/'+filename, 'r')
-#         level1_files = json.load(f)
-#         f.close()
-#
-#         norders = len(level1_files['science'])
-#
-#         for i in np.arange(norders):
-#             sci_file  = level1_files['science'][i]['wave']
-#             asci_file = level1_files['anti_science'][i]['wave']
-#             std_file  = level1_files['standard'][i]['wave']
-#             OCalSpec = CalSpec(sci_file,std_file,shift=self.shift1,dtau=self.dtau1,write_path='../pynirspec-out/CAL1D',order=i+1)
-#             ACalSpec = CalSpec(asci_file,std_file,shift=self.shift2,dtau=self.dtau2,write_path='../pynirspec-out/CAL1D',order=i+1)
-#             OSASpec = SASpec(OCalSpec.file,ACalSpec.file, write_path='../pynirspec-out/SA1D',order=i+1)
-
 
 def readFilelist(listfile):
     funit = open(listfile)
