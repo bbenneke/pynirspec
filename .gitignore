@@ -6,8 +6,9 @@ dist/
 *.py[cod]
 __pycache__/
 *.so
-*~
 *.xml
+*.DS_Store
+*~
 
 # due to using tox and pytest
 .tox
