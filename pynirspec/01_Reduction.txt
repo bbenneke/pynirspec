@@ -1,0 +1,46 @@
+nirspec_oO.ini
+[KL_HIRES]
+filter    = 'KL'								pull from observation logs
+echelle   = 62.68 								pull from observation logs	
+crossdisp = 35.53								pull from observation logs
+norders   = 1									orders in band. must match following six entries
+wrange1   = [2.355,2.391] 						in microns. approimate okay. [wmin,wmax]
+yrange1   = [108,219]							use ds9. A,B nods must be separated by bisector of [ymin,ymax]
+A1        = [ 2.356270,     2.356270] 			0th order coefficient for initial guess of wavelength solution. [A,B]
+B1        = [ 3.466778e-05, 3.466778e-05]		linear coefficient for initial guess of wavelength solution. [A,B]
+C1        = [-8.953778e-09, -8.953778e-09] 		quadratic coefficient for initial guess of wavelength solution. [A,B]
+R1        = [25000.0, 25000.0]					resolving power. atmospheric model is convolved to data resolution. [A,B]
+
+pl_28jan2013.py
+path = '/Users/ncrockett/nirspec/data/2013B_jan/Rawdata/'	location of data
+Flat_hrK     = [(262,281)]									flats [begin,end]
+FlatDark_hrK = [(252,261)]									darks for flats [begin,end]
+ObsDark_0p25x1 = [(73,76)]									darks for science target [begin,end]
+
+## WASP-19
+Red = pn.Reduction(...
+flat_range=Flat_hrK,						flats [begin,end]				
+flat_dark_range=FlatDark_hrK,				darks for flats [begin,end]
+dark_range=ObsDark_0p25x1,					darks for science target [begin,end]
+sci_range=[(171,174)],						science target. may be given as [(begin1,end1),(begin2,end2)...] for multiple exposures
+std_range=[(163,166)],						standard target [begin,end]. only one required.
+path=path, 									location of data
+base='jan28',								necessary for finding proper files
+shift1=0.0,									leave it
+dtau1=-0.0,									leave it
+shift2=0.0,									leave it
+dtau2=-0.0,									leave it
+level1=True,								will produce wavelength-calibrated data with flats/darks removed. must terraspec.
+level2=True, 								wavelength-calibrated standard (i.e. tellurics) is removed from wavelength-calibrated data
+SettingsFile='dpiskorz/nirspec_o0.ini',		initialization file, above
+ci_tname='WASP19', 							for output file
+std_tname='HD72113', 						for output file
+hold_plots=True)							will show wavelength-calibrated plot. must close to proceed.
+
+***Create the following directories before running script:
+		CAL1D 		Level 2 output
+		L1FILES
+		SA1D
+		SPEC1D
+		SPEC2D
+		WAVE		Level 1 output (?)
