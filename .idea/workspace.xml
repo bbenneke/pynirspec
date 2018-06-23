@@ -15,8 +15,8 @@
       <file leaf-file-name="pynirspec.py" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/pynirspec/pynirspec.py">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="177">
-              <caret line="388" column="50" lean-forward="false" selection-start-line="388" selection-start-column="50" selection-end-line="388" selection-end-column="50" />
+            <state relative-caret-position="5820">
+              <caret line="388" column="45" lean-forward="false" selection-start-line="388" selection-start-column="45" selection-end-line="388" selection-end-column="45" />
               <folding>
                 <element signature="e#0#15#0" expanded="true" />
                 <marker date="1529710637000" expanded="true" signature="65825:65899" ph="..." />
@@ -152,7 +152,7 @@
     <servers />
   </component>
   <component name="ToolWindowManager">
-    <frame x="-2" y="23" width="1280" height="725" extended-state="1" />
+    <frame x="-2" y="23" width="1280" height="725" extended-state="0" />
     <editor active="true" />
     <layout>
       <window_info id="TODO" active="false" anchor="bottom" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.33" sideWeight="0.5" order="6" side_tool="false" content_ui="tabs" />
@@ -207,8 +207,8 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/pynirspec/pynirspec.py">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="177">
-          <caret line="388" column="50" lean-forward="false" selection-start-line="388" selection-start-column="50" selection-end-line="388" selection-end-column="50" />
+        <state relative-caret-position="5820">
+          <caret line="388" column="45" lean-forward="false" selection-start-line="388" selection-start-column="45" selection-end-line="388" selection-end-column="45" />
           <folding>
             <element signature="e#0#15#0" expanded="true" />
             <marker date="1529710637000" expanded="true" signature="65825:65899" ph="..." />
