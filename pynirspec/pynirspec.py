@@ -408,7 +408,7 @@ class Nod(Observation):
     def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',plots_dir=None,**kwargs):
 
         # Inherits Observation
-        Observation.__init__(self,filelist,out_dir=out_dir,**kwargs)
+        Observation.__init__(self,filelist,**kwargs)
         self.type = 'nod'                
         self.setting,self.echelle,self.crossdisp = self.getSetting()
         # Get list of airmasses through the science sequence
@@ -434,7 +434,7 @@ class Nod(Observation):
         plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
         plt.colorbar()
         plt.text(100, 100, '1 A-B BEFORE dividing by flat & bp correction')
-        plt.savefig(self.plots_dir+'sample-A_B-before-flattening.png')
+        plt.savefig(self.plots_dir+'/sample-A_B-before-flattening.png')
 
         # Divide by normalized flats
         if flat:
@@ -447,7 +447,7 @@ class Nod(Observation):
         plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
         plt.colorbar()
         plt.text(100, 100, '1 A-B image AFTER dividing by flat & bp correction')
-        plt.savefig(self.plots_dir+'sample-A_B-after-flattening.png')
+        plt.savefig(self.plots_dir+'/sample-A_B-after-flattening.png')
 
 
        # Reassign variable names for A-B images
@@ -474,7 +474,7 @@ class Nod(Observation):
                 plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
                 plt.colorbar()
                 plt.text(100, 100, '1 nod BEFORE dividing by flat & bp correction')
-                plt.savefig(self.plots_dir+'sample-Anod-before-flattening.png')
+                plt.savefig(self.plots_dir+'/sample-Anod-before-flattening.png')
 
             if flat:
                 self.divideInStack(flat)
@@ -488,7 +488,7 @@ class Nod(Observation):
                 plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
                 plt.colorbar()
                 plt.text(100, 100, '1 nod AFTER dividing by flat & bp correction')
-                plt.savefig(self.plots_dir+'sample-Anod-after-flattening.png')
+                plt.savefig(self.plots_dir+'/sample-Anod-after-flattening.png')
 
 
             beam_sky_stacks.append(self.stack)
