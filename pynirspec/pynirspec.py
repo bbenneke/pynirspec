@@ -2,18 +2,21 @@ import warnings
 import json
 import os
 import ConfigParser as cp
-
 import numpy as np
 import numpy.ma as ma
 import astropy.io.fits as pf
 import scipy.fftpack as fp
-from scipy.stats import tmean, tvar
+from scipy.stats import tmean, tvar, sigmaclip
 from scipy.ndimage.filters import median_filter
+from scipy.optimize import curve_fit
 from scipy import constants
+from scipy.signal import medfilt
 import matplotlib.pylab as plt
 from collections import Counter
 import sys
 import inpaint as inpaint
+sys.path.insert(0, '../')
+import atmopt.rfm_tools as rfm
 
 class Environment():
     '''
@@ -193,27 +196,19 @@ class Observation():
         echelle   = echelle[0]
         crossdisp = crossdisp[0]
 
-        #print ('echelle: ' + str(echelle))
-        #print ('crossdisp: ' + str(crossdisp))
-
         echelles   = self.Envi.getItems('echelle')
         crossdisps = self.Envi.getItems('crossdisp')
-
-        # print (echelles)
-        # print (crossdisps)
 
         # Note: the following steps are unnecessary when user supplies a custom .ini file
         # Get indices of echelle position in .ini file that match that in the header
         setsub1 = [i for i,v in enumerate(echelles) if float(v)==echelle]
-        # print (setsub1)
+
         # Get indices of crossdisp position in .ini file that match that in the header
         setsub2 = [i for i,v in enumerate(crossdisps) if float(v)==crossdisp]
-        # print (setsub2)
+
         # Determine the correct section (configuration) as
         # the one containing both the correct echelle pos and crossdisp pos
         sub = [i for i in setsub1 if i in setsub2]
-        # print (sub)
-        #print (self.Envi.getSections()[sub[0]])
         return self.Envi.getSections()[sub[0]],echelle,crossdisp
 
     # Return a list of airmasses, converting faulty values to the mean
@@ -292,24 +287,13 @@ class Observation():
         if stack is None:
             stack,ustack = self.stack,self.ustack
 
-        #stack_median = np.median(stack,2)
-        #stack_stddev = np.std(stack,2)
-        #shape = stack.shape
-        #masked_stack = ma.zeros(shape)
-
         # Mask invalid points so that errors do not occur in math operations
         masked_stack = ma.masked_invalid(stack)
         masked_ustack = ma.masked_invalid(ustack)
 
-        # print (masked_stack.shape)
-        # print (masked_ustack.shape)
-
         # Take weighted average of a sequence of images
         image = ma.average(masked_stack,2,weights=1./masked_ustack**2)
         uimage = np.sqrt(ma.mean(masked_ustack**2,2)/ma.count(masked_ustack,2))
-
-        # print (image.shape)
-        # print (uimage.shape)
 
         return image, uimage
 
@@ -321,7 +305,7 @@ class Observation():
         hdu = pf.PrimaryHDU(self.image.data)
         uhdu = pf.ImageHDU(self.uimage.data)
         hdulist = pf.HDUList([hdu,uhdu])
-        hdulist.writeto(filename,clobber=True)
+        hdulist.writeto(filename,overwrite=True)
 
     # Returns list of values for a specific header key
     def getKeyword(self,keyword):
@@ -389,7 +373,7 @@ class Dark(Observation):
         self._badPixMap(filename=self.out_dir + '/badpix.dmp')
         # Whether to save combined dark frame
         if save:
-            self.writeImage(filename=self.out_dir + self.type + '.fits')
+            self.writeImage(filename=self.out_dir + 'flat-' + self.type + '.fits')
 
     # Create bad pixel map
     def _badPixMap(self,clip=30,filename='badpix.dmp'):
@@ -405,7 +389,7 @@ class Dark(Observation):
 
 ## Class for science images (both A and B nods). Prepares A-B images, as well as a sky image
 class Nod(Observation):
-    def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',plots_dir=None,**kwargs):
+    def __init__(self,filelist,dark=None,flat=None,badpix='badpix.dmp',plots_dir=None,tname=None,**kwargs):
 
         # Inherits Observation
         Observation.__init__(self,filelist,**kwargs)
@@ -416,6 +400,7 @@ class Nod(Observation):
         # Mean airmass
         self.airmass = np.mean(self.airmasses)
         self.plots_dir = plots_dir
+        self.tname = tname
 
         # List of RA, DEC, and file numbers for science images
         RAs  = self.getKeyword('RA')
@@ -427,73 +412,98 @@ class Nod(Observation):
         # Get sequence of A-B images from nod pairs
         self.stack,self.ustack = self._makePairStack(pairs)
         
-        # self.stack,self.ustack = self._getStack()  #MLB ADD - these are the A, B images (not A-B)
         # Frame size
         self.height = self.stack[:,:,0].shape[0]
 
-        plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
-        plt.colorbar()
-        plt.text(100, 100, '1 A-B BEFORE dividing by flat & bp correction')
-        plt.savefig(self.plots_dir+'/sample-A_B-before-flattening.png')
+        # Save each A-B pair as fits cube
+        cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+        for slice in range(self.stack.shape[2]):
+            im = self.stack[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(self.plots_dir+'/A-B-before-flattening.fits', cube, overwrite=True)
 
         # Divide by normalized flats
         if flat:
             self.divideInStack(flat)
+
+        cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+        for slice in range(self.stack.shape[2]):
+            im = self.stack[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(self.plots_dir + '/A-B-after-flattening.fits', cube, overwrite=True)
+
         # Correct bad pixels through a weighted local mean
         if badpix:
             badmask = np.load(badpix)
             self._correctBadPix(badmask)
 
-        plt.imshow(self.stack[:, :, 0], vmin=-200, vmax=200, cmap='gray')
-        plt.colorbar()
-        plt.text(100, 100, '1 A-B image AFTER dividing by flat & bp correction')
-        plt.savefig(self.plots_dir+'/sample-A_B-after-flattening.png')
+        cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+        for slice in range(self.stack.shape[2]):
+            im = self.stack[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(self.plots_dir + '/A-B-after-bpRemoval.fits', cube, overwrite=True)
 
-
-       # Reassign variable names for A-B images
+        # Reassign variable names for A-B images
         self.TargetStack, self.UTargetStack = self.stack, self.ustack
 
-        # stack_t = self.TargetStack
-        # print (type(stack_t))
-        # print (stack_t.shape)
-        
         # An averaged sky frame is constructed using the off-beam pixels
         # Separated stacks for A images and B images
         stackA,ustackA,stackB,ustackB = self._makeSingleBeamStacks(pairs)
         beamStacks = [(stackA,ustackA),(stackB,ustackB)] 
 
-        # Creates preprocessed (not dark-subtracted???) images for A image and B image separately)
+        # Creates preprocessed images for A image and B image separately)
         beam_sky_stacks, beam_usky_stacks = [], []
-        test_count = 0
+        count = 0
         for beamStack in beamStacks:
             self.stack = beamStack[0]
             self.ustack = beamStack[1]
 
-            if test_count == 0:
-                #Plot image before flat correction
-                plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
-                plt.colorbar()
-                plt.text(100, 100, '1 nod BEFORE dividing by flat & bp correction')
-                plt.savefig(self.plots_dir+'/sample-Anod-before-flattening.png')
+            if count ==0:
+                fname1 = self.plots_dir + '/Anod-after-darksub.fits'
+                fname2 = self.plots_dir + '/Anod-after-flattening.fits'
+                fname3 = self.plots_dir + '/Anod-after-bpRemoval.fits'
+            elif count ==1:
+                fname1 = self.plots_dir + '/Bnod-after-darksub.fits'
+                fname2 = self.plots_dir + '/Bnod-after-flattening.fits'
+                fname3 = self.plots_dir + '/Bnod-after-bpRemoval.fits'
+
+            cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+            for slice in range(self.stack.shape[2]):
+                im = self.stack[:, :, slice]
+                uim = self.ustack[:, :, slice]
+                self.image = im
+                self.uimage = uim
+                ### Subtract dark to test destriping
+                if dark:
+                    self.subtractFromStack(dark)
+                # Update the stack after dark subtracting for one image
+                self.stack[:,:,slice] = self.image
+                self.ustack[:,:,slice] = self.uimage
+                cube[slice, :, :] = self.image
+
+            pf.writeto(fname1, cube, overwrite=True)
 
             if flat:
                 self.divideInStack(flat)
+            cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+            for slice in range(self.stack.shape[2]):
+                im = self.stack[:, :, slice]
+                cube[slice, :, :] = im
+            pf.writeto(fname2, cube, overwrite=True)
 
             if badpix:
                 badmask = np.load(badpix)
                 self._correctBadPix(badmask)
 
-            if test_count == 0:
-                #Plot flat-corrected image to compare
-                plt.imshow(self.stack[:,:,0], vmin=-200, vmax=1500, cmap='gray')
-                plt.colorbar()
-                plt.text(100, 100, '1 nod AFTER dividing by flat & bp correction')
-                plt.savefig(self.plots_dir+'/sample-Anod-after-flattening.png')
-
+            cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+            for slice in range(self.stack.shape[2]):
+                im = self.stack[:, :, slice]
+                cube[slice, :, :] = im
+            pf.writeto(fname3, cube, overwrite=True)
 
             beam_sky_stacks.append(self.stack)
             beam_usky_stacks.append(self.ustack)
-            test_count = test_count + 1
+            count =+ 1
 
         self.beamSkyStacks  = beam_sky_stacks
         self.beamUSkyStacks = beam_usky_stacks
@@ -656,7 +666,7 @@ class Nod(Observation):
 ## 1) create A-B images for a specific order, 2) shift images to match pos of the first image,
 ## 3) combine images, and 4) rectify the combined image by fitting a polynomial
 class Order():
-    def __init__(self,Nod,onum=1,trace=None,write_path=None):
+    def __init__(self,Nod,onum=1,trace=None,write_path=None, targetType = 'bright'):
         self.type = 'order'
         self.header  = Nod.header
         self.setting = Nod.setting
@@ -664,6 +674,8 @@ class Order():
         self.crossdisp = Nod.crossdisp
         self.airmass = Nod.airmass
         self.Envi    = Nod.Envi
+        self.tname = Nod.tname
+        self.targetType = targetType
         # Order being processed
         self.onum    = onum
         # Spatial range of order in units of pixels
@@ -671,11 +683,17 @@ class Order():
         
         # Crop A-B images in the spatial direction to extract a single order
         self.stack  = Nod.TargetStack[self.yrange[0]:self.yrange[1],:,:]
-        #print (self.stack.shape)
         self.ustack = Nod.UTargetStack[self.yrange[0]:self.yrange[1],:,:]
         nexp = len(self.stack[0,0,:])
+        self.write_path = write_path
 
-        img_stack = self.stack
+        # Save intermediate products to plots folder
+        plots_path = self.write_path.replace('SPEC2D', 'PLOTS/') + 'A-B-order' + str(onum) + '.fits'
+        cube = np.zeros((self.stack.shape[2], self.stack.shape[0], self.stack.shape[1]))
+        for slice in range(self.stack.shape[2]):
+            im = self.stack[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(plots_path, cube, overwrite=True)
 
         # Get y offsets between the same order from each image
         offsets1, offsets2 = self._findYOffsets()
@@ -685,15 +703,34 @@ class Order():
         self.stack2  = self._yShift(offsets2,self.stack)
         self.ustack2 = self._yShift(offsets2,self.ustack)
 
+        # Save intermediate products to plots folder
+        plots_path = self.write_path.replace('SPEC2D', 'PLOTS/') + 'yShifted-posTrace-order'+str(onum)+'.fits'
+        cube = np.zeros((self.stack1.shape[2], self.stack1.shape[0], self.stack1.shape[1]))
+        for slice in range(self.stack1.shape[2]):
+            im = self.stack1[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(plots_path, cube, overwrite=True)
+
+        plots_path = self.write_path.replace('SPEC2D', 'PLOTS/') + 'yShifted-negTrace-order'+str(onum)+'.fits'
+        cube = np.zeros((self.stack2.shape[2], self.stack2.shape[0], self.stack2.shape[1]))
+        for slice in range(self.stack2.shape[2]):
+            im = self.stack2[:, :, slice]
+            cube[slice, :, :] = im
+        pf.writeto(plots_path, cube, overwrite=True)
+
         # Combine A-B images with weighted average
         self.image1, self.uimage1 = self._collapseOrder(stack=self.stack1, ustack=self.ustack1)
         self.image2, self.uimage2 = self._collapseOrder(stack=self.stack2, ustack=self.ustack2)
 
-
-        # Fit polynomial to rectify combined A-B image
+        # Fitting method for fitTrace function. Use the more sensitive Gauss method for faint companions
+        if self.targetType == 'faint':
+            fitMethod = 'Gauss'
+        else:
+            fitMethod = 'FFT'
+        # Fit polynomial to rectify A-B image
         if trace is None:
-            yr1, trace1 = self.fitTrace(self.image1, 1)
-            yr2, trace2 = self.fitTrace(self.image2, 2)
+            yr1, trace1 = self.fitTrace(self.image1, 1, tunekWidth=False, fitMethod=fitMethod)
+            yr2, trace2 = self.fitTrace(self.image2, 2, tunekWidth=False, fitMethod=fitMethod)
             yrs, traces  = [yr1, yr2], [trace1, trace2]
   
         images, uimages = [self.image1, self.image2], [self.uimage1, self.uimage2]
@@ -701,8 +738,9 @@ class Order():
         # Use trace to correct for non-linearity in combined order, i.e. rectifying
         self.image_rect, self.uimage_rect = self.yRectify(images, uimages, yrs, traces)
         self.sh = self.image_rect.shape
+        #print self.sh
 
-        # Subtract median of each column from the same column - SKY SUBTRACTION METHOD
+        # Subtract median of each column from the same column - SKY SUBTRACTION
         self._subMedian()
 
         # Repeat above for individual A and B images
@@ -738,7 +776,7 @@ class Order():
         # plt.text(30, 30, 'sky rect initial')
         # plt.show()
 
-        ## These lines create the sky! This is done by using values from both the A and B image
+        ## These lines create the sky. This is done by using values from both the A and B image
         ## Specifically, (B-A) image is made, and where the counts are < 2*error,
         ## the counts from A are replace with the counts from B. This ensures the spectra in A is replaced by sky counts from B
         ssubs = np.where(beamSkyRect[1]-beamSkyRect[0]<2.*beamUSkyRect[0])
@@ -760,9 +798,27 @@ class Order():
         # plt.text(30, 30, 'SPEC 2D errors')
         # plt.show()
 
+        # MLB ADD - need to remove bad pixels in 2D SPEC
+        img_medfilt = medfilt(self.image_rect, 7)
+        sigma = np.median(self.uimage_rect)
+        badimg = np.abs((self.image_rect - img_medfilt)) / sigma > 7.0
+        img_rectc = self.image_rect
+
+        # Replace bad pixels with median filtered results
+        img_rectc[badimg] = img_medfilt[badimg]
+
+        self.image_rect = img_rectc
+
+        skyimg_medfilt = medfilt(self.sky_rect, 7)
+        sigma = np.median(self.usky_rect)
+        badsky = np.abs((self.sky_rect - skyimg_medfilt)) / sigma > 7.0
+        sky_rectc = self.sky_rect
+        sky_rectc[badsky] = skyimg_medfilt[badsky]
+
+        self.sky_rect = sky_rectc
+
         if write_path:
             self.file = self.writeImage(path=write_path)
-
 
     def _collapseOrder(self, stack=None, ustack=None):
 
@@ -798,45 +854,47 @@ class Order():
     # Compute offsets in y (spatial direction) between different images
     def _findYOffsets(self, kwidth=100):
         sh = self.stack.shape
-        yr1 = (0, sh[0]/2-1)     #Bottom half of order (A or B pos)
-        yr2 = (sh[0]/2,sh[0]-1)  #Top half of order (other A or B pos)
+
+        yr1 = (0, sh[0] / 2 - 1)  # Postive trace
+        yr2 = (sh[0] / 2, sh[0] - 1)  # Negative trace
         yrs = [yr1,yr2]
 
         offsets1 = np.empty(0)
         offsets2 = np.empty(0)
-        # Iterate twice, for bottom half and then top half of order
+        # Iterate twice, for positive trace and neg trace
         for i in range(0, len(yrs)):
             yr = yrs[i]
             yindex = np.arange(yr[0],yr[1]+1) #Top or Bottom of Order
-            # Use the first A-B image as the kernel
-            kernel_image = self.stack[:,:,0]
-            #print (yindex)
+            # Use the middle A-B image as the kernel by default
+            kernel_image = self.stack[:, :, 0]
 
             # Median of values along the wavelength direction, over the central 200 pixels
             kernel_o = np.median(kernel_image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
-            #print ((kernel_image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth]).shape)
-            #print (kernel_o)
-            # Median of the top or bottom half of the order
+
+            # Median of those medians
             kernel_med = np.median(kernel_o)
-            # why subtract, what is the kernel???
             kernel = np.subtract(kernel_o, kernel_med)
 
-            # Iterate over A-B images
+            # Iterate over each A-B image
+            centroids = []
             for j in range(0,sh[2]):
-                image = self.stack[:,:,j]                
+                image = self.stack[:,:,j]
+                # Median y values for a window of size kwidth
                 profile_o = np.median(image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
+                # Median of those medians
                 profile_med = np.median(profile_o)
+                # Normalize y profile by subtracting off the median
                 profile = np.subtract(profile_o, profile_med)
                 # Cross correlation between kernel and image - ???
                 cc = fp.ifft(fp.fft(kernel)*np.conj(fp.fft(profile)))
                 cc_sh = fp.fftshift(cc)
                 cen = calc_centroid(cc_sh).real - yindex.shape[0]/2.
+                centroids.append(cen)
 
                 if (i == 0):
                     offsets1 = np.append(offsets1,cen)
                 if (i == 1):
                     offsets2 = np.append(offsets2,cen)
-
                 
         print ''
         print 'Img  A      B'
@@ -847,54 +905,257 @@ class Order():
 
         return offsets1, offsets2
 
-    def fitTrace(self, image, OneOrTwo, kwidth=40):
-        sh = image.shape
+    # Added option to tune kwidth by finding the smallest residuals to the polyfit
+    def fitTrace(self, image, OneOrTwo, kwidth=100, fitMethod = 'FFT'):
 
+        sh = image.shape
+        # A nod (1) or B nod (2) position
         if (OneOrTwo == 1):
+            print ('positive trace')
             yr = (0,sh[0]/2-1)
         if (OneOrTwo == 2):
+            print ('negative trace')
             yr = (sh[0]/2,sh[0]-1)
-        
-        yindex = np.arange(yr[0],yr[1]+1) #Top or Bottom of Order
-        kernel = np.median(image[yindex,sh[1]/2-kwidth:sh[1]/2+kwidth],1)
-                    
+
+
+        yindex = np.arange(yr[0], yr[1] + 1)  # Top or Bottom of Order
+        kernel = np.median(image[yindex, sh[1] / 2 - kwidth:sh[1] / 2 + kwidth], 1)
         centroids = []
         totals = []
         # Iterate over each col (wavelength direction)
         # Check
         for i in np.arange(sh[1]):
-            col_med = np.median(image[yindex,i])
-            total = np.abs((image[yindex,i]-col_med).sum())
-            cc = fp.ifft(fp.fft(kernel)*np.conj(fp.fft(image[yindex,i]-col_med)))
+            col_med = np.median(image[yindex, i])
+            total = np.abs((image[yindex, i] - col_med).sum())
+            cc = fp.ifft(fp.fft(kernel) * np.conj(fp.fft(image[yindex, i] - col_med)))
             cc_sh = fp.fftshift(cc)
-            centroid = calc_centroid(cc_sh).real - yindex.shape[0]/2.
+            centroid = calc_centroid(cc_sh).real - yindex.shape[0] / 2.
             centroids.append(centroid)
             totals.append(total)
 
         centroids = np.array(centroids)
         totals = np.array(totals)
-        median_totals = np.median(totals)            
-        
+        median_totals = np.median(totals)
+
         xindex = np.arange(sh[1])
-        gsubs = np.where((np.isnan(centroids)==False) & (totals>median_totals*0.25) & (totals<median_totals*1.75))
-
-        centroids[gsubs] = median_filter(centroids[gsubs],size=50)
+        gsubs = np.where((np.isnan(centroids) == False) & (totals > median_totals * 0.25) & (totals < median_totals * 1.75))
+        centroids[gsubs] = median_filter(centroids[gsubs], size=50)
         # Fit 3-order polynomial to order
-        coeffs = np.polyfit(xindex[gsubs],centroids[gsubs],3)
-
+        fit_params = np.polyfit(xindex[gsubs], centroids[gsubs], 3, full=True)
+        # residuals
+        res = fit_params[1][0]
+        # coefficients of poly
+        coeffs = fit_params[0]
         poly = np.poly1d(coeffs)
-            
-        return yr,poly
+        print ('FFT polyfit residuals: ' + str(res))
+
+        # Gaussian fit
+        def gauss(x, a, x0, sigma):
+            y = a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
+            return y
+
+        if fitMethod == 'Gauss':
+
+            # 2nd iteration using fft trace (from polyfit) as guesses for Gaussian fit
+            gauss_centroids = []
+            # Iterate over columns
+            gauss_fail = 0
+            model_centroids = []
+
+            for i in np.arange(sh[1]):
+                model_centroids.append(poly[i])
+
+            for i in np.arange(sh[1]):
+                counts = image[yindex, i]
+                # Better guess?
+                sigma = 1.5
+
+                sigma_stats = sigmaclip(counts, low=6.0, high=6.0)
+                upper_l = sigma_stats[2]
+                lower_l = sigma_stats[1]
+
+                # Positive trace
+                if OneOrTwo == 1:
+                    # Five tallest peaks
+                    peaks = counts[counts.argsort()[-5:][::-1]]
+                # Negative trace
+                else:
+                    # Five lowest peals
+                    peaks = counts[counts.argsort()[:5]]
+
+                peaks_clipped = []
+                for p in peaks:
+                    if not (p > upper_l or p < lower_l):
+                        peaks_clipped.append(p)
+
+                peaks_clipped = np.asarray(peaks_clipped)
+
+                # If there are any valid peaks
+                if len(peaks_clipped) > 0:
+                    # Fit a Gaussian for each of the peaks
+                    sigma_list = []
+                    a_list = []
+                    x0_list = []
+                    fit_list = []
+
+                    for peak_height in peaks_clipped:
+                        try:
+                            peak_index = np.argwhere(counts == peak_height)[0][0]
+                            mean = yindex[peak_index]
+
+                            initial_guess = [peak_height, mean, sigma]
+
+                        except:
+                            pass
+
+                        try:
+                            popt, pcov = curve_fit(gauss, yindex, counts, p0=initial_guess)
+                            #  Generate y-data based on the fit.
+                            count_fit = gauss(yindex, *popt)
+                            count_fit = count_fit.tolist()
+                            #print (count_fit)
+
+                            fit_list.append(count_fit)
+                            x0_list.append(popt[1])
+                            a_list.append(popt[0])
+                            sigma_list.append(popt[2])
+
+                        # Failed to fit Gaussian curve for this peak option at this pixel
+                        except:
+                            pass
+
+                    sigma_list = np.asarray(sigma_list)
+                    a_list = np.asarray(a_list)
+                    x0_list = np.asarray(x0_list)
+                    fit_list = np.asarray(fit_list)
+
+
+                    if len(sigma_list) > 0:
+                        bad_ind = []
+                        for j in range(len(sigma_list)):
+                            others = np.delete(x0_list, [j])
+                            offset = abs(x0_list[j] - np.median(others))
+
+                            ## Double-check the peaks found by doing:
+                            # 1 Remove fits where sigma was either too big or too small
+                            # 2 Remove fits where height of Gauss fit is too large
+                            # 3 Remove fits where peak is far away from other peaks
+                            if (sigma_list[j] > 20.0 or sigma_list[j] < 1.0 or a_list[j] > upper_l or a_list[j] < lower_l or offset > (yindex[0]+yindex[-1])/4.0):
+                                bad_ind.append(j)
+
+                        # If there were bad indices
+                        if len(bad_ind) > 0:
+                            sigma_list = np.delete(sigma_list, bad_ind)
+                            a_list = np.delete(a_list, bad_ind)
+                            x0_list = np.delete(x0_list, bad_ind)
+
+                            fit_list = np.delete(fit_list, bad_ind, 0)
+
+                        # After deleting bad indices, check again if there are values left
+                        if len(sigma_list) > 0:
+                            # Pick the peak with the largest sigma
+                            final_ind = np.argmax(sigma_list)
+                            gauss_centroid = x0_list[final_ind]
+                            count_fit = fit_list[final_ind]
+                            gauss_centroids.append(gauss_centroid)
+
+                            # Plot gaussian fit
+                            if self.onum == 5 or self.onum == 6:
+                                if OneOrTwo == 2:
+                                    if i % 50 == 0:
+                                        # Create a plot of our work, showing both the data and the fit.
+                                        fig, ax = plt.subplots()
+                                        ax.plot(yindex, counts, 'b+:', label='data')
+                                        ax.plot(yindex, count_fit, 'ro:', label='fit; final params: a = ' + str(
+                                            a_list[final_ind]) + ' x0 = ' + str(
+                                            gauss_centroid) + ' sigma = ' + str(sigma_list[final_ind]))
+
+                                        ax.legend()
+                                        ax.set_xlabel('y index')
+                                        ax.set_ylabel('count')
+                                        #plt.show()
+                                        plt.savefig(
+                                            self.write_path.replace('SPEC2D', 'PLOTS/') + 'gaussFit-order' + str(
+                                                self.onum) + '-xpixel' + str(i + 1) + '.png')
+                                        plt.close()
+
+                        else:
+                            gauss_fail = gauss_fail + 1
+                            gauss_centroids.append(np.nan)
+
+                    else:
+                        gauss_fail = gauss_fail+1
+                        gauss_centroids.append(np.nan)
+
+                else:
+                    gauss_fail = gauss_fail + 1
+                    gauss_centroids.append(np.nan)
+
+            print ('Gauss failed: ' + str(gauss_fail))
+            gauss_centroids = np.array(gauss_centroids)
+            print (gauss_centroids)
+            print len(gauss_centroids)
+
+            gauss_gsubs = np.where(np.isnan(gauss_centroids) == False)
+            print len(gauss_gsubs[0])
+
+            gauss_centroids[gauss_gsubs] = median_filter(gauss_centroids[gauss_gsubs], size=50)
+            gauss_cen_med = np.median(gauss_centroids[gauss_gsubs])
+
+            # Fit 3-order polynomial to order
+            g_fit_params = np.polyfit(xindex[gauss_gsubs],gauss_cen_med-gauss_centroids[gauss_gsubs], 3, full=True)
+            # residuals
+            min_g_res = g_fit_params[1][0]
+            # Polynomial fit for Gauss fit
+            g_coeffs = g_fit_params[0]
+            g_poly = np.poly1d(g_coeffs)
+
+
+            print ('Gauss polyfit residuals: '+str(min_g_res))
+            fig = plt.figure(figsize=(18, 12))
+            ax1 = fig.add_subplot(1, 1, 1)
+            # FFT and Gauss fit models
+            ax1.plot(xindex[gsubs], poly(xindex[gsubs]), label='FFT fit', ls=':', lw=4, color='black')
+            ax1.plot(xindex[gauss_gsubs], g_poly(xindex[gauss_gsubs]), label='Gauss fit', ls='-.', lw=4, color='black')
+            # Data points
+            ax1.scatter(xindex[gsubs], centroids[gsubs], label='FFT centroids', color='red', s=2)
+            #ax1.scatter(xindex[gauss_gsubs], gauss_centroids[gauss_gsubs], label='Gauss centroids', color='blue', s=2)
+            #ax1.scatter(xindex[gauss_gsubs], ((yindex[0]+yindex[-1]) / 2.0) - gauss_centroids[gauss_gsubs], label='gauss centroids', color='blue')
+            ax1.scatter(xindex[gauss_gsubs], gauss_cen_med - gauss_centroids[gauss_gsubs],label='gauss centroids', color='blue')
+            ax1.set_ylim(-20, 15)
+            ax1.set_xlabel('x pixel (wavelength direction)')
+            ax1.set_ylabel('centroid position')
+            ax1.legend(loc='upper left')
+            #plt.show()
+
+            ax1.set_title('fft residuals: ' + str(res) + ', kwidth: ' + str(kwidth))
+            if OneOrTwo == 1:
+                whichHalf = 'pos'
+            else:
+                whichHalf = 'neg'
+            plt.savefig(self.write_path.replace('SPEC2D', 'PLOTS/') + 'fitTrace-order'+str(self.onum)+'-'+whichHalf+'.png')
+
+            # print ('yr and g_poly: ')
+            # print ('------------------------')
+            # print yr
+            # print g_poly
+
+            ## If using Gaussian method
+            return yr, g_poly
+
+        ## With FFT method
+        else:
+            return yr,poly
 
     def yRectify(self,images,uimages,yrs,traces): 
 
         sh = images[0].shape
         image_rect = np.zeros(sh)
         uimage_rect = np.zeros(sh)
-        
-        for yr,trace,image,uimage in zip(yrs,traces,images,uimages):
-            index = np.arange(yr[0],yr[1]+1) 
 
+        for yr,trace,image,uimage in zip(yrs,traces,images,uimages):
+            index = np.arange(yr[0],yr[1]+1)
+            # Iterate over columns
             for i in np.arange(sh[1]):
                 col = np.interp(index-trace(i),index,image[index,i])
                 image_rect[index,i] = col
@@ -905,11 +1166,7 @@ class Order():
         
     # Subtract median of each column from that column
     def _subMedian(self):
-        #print (self.image_rect[:,500])
-        #print (np.median(self.image_rect, axis=0)[500])
         self.image_rect = self.image_rect-np.median(self.image_rect,axis=0)
-        #print ((self.image_rect).shape)
-        #print (self.image_rect[:,500])
 
     def writeImage(self,filename=None,path='.'):
 
@@ -938,7 +1195,7 @@ class Order():
 
         hdulist = pf.HDUList([hdu,uhdu,sky_hdu,usky_hdu])
 
-        hdulist.writeto(filename,clobber=True)
+        hdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -981,11 +1238,15 @@ class Spec1D():
         # print (self.flux_neg)
 
         # ???
-        # if sa:
-        #     self.sa_pos,self.usa_pos,self.sa_neg,self.usa_neg = self.SpecAst(PSF)
+        if sa:
+            #self.sa_pos,self.usa_pos,self.sa_neg,self.usa_neg = self.SpecAst(PSF)
+            self.sa_pos = self.flux_pos
+            self.usa_pos = self.uflux_pos
+            self.sa_neg = self.flux_neg
+            self.usa_neg = self.uflux_neg
 
-        # if write_path:
-        #     self.file = self.writeSpec(path=write_path)
+        if write_path:
+            self.file = self.writeSpec(path=write_path)
 
     # Create normalized 1D PSF in a window from x=300 to x=900 pixels
     def getPSF(self,range=(300,900)):
@@ -1023,6 +1284,39 @@ class Spec1D():
         uim = self.Order.uimage_rect
         sky = self.Order.sky_rect
         usky = self.Order.usky_rect
+
+        # Save PSF plots
+        pos_psf = PSF[:npsf / 2 - 1]
+        pos_y = np.linspace(0, npsf / 2 - 1, PSF[:npsf / 2 - 1].size, dtype=int)
+        #
+        # print (pos_psf.shape)
+        # print pos_y.shape
+
+        fig, ax = plt.subplots()
+        ax.plot(pos_y, pos_psf, 'b+:', label='PSF of positive trace')
+
+        ax.legend()
+        ax.set_xlabel('y index')
+        ax.set_ylabel('normalized flux')
+        plt.savefig(self.writepath.replace('SPEC1D', 'PLOTS/') + 'posPSF-order' + str(
+                self.onum) + '.png')
+        plt.close()
+
+        neg_psf = PSF[npsf/2:-1]
+        neg_y = np.linspace(npsf/2, npsf-1, PSF[npsf/2:-1].size, dtype=int)
+
+        # print neg_psf.shape
+        # print neg_y.shape
+
+        fig, ax = plt.subplots()
+        ax.plot(neg_y, neg_psf, 'b+:', label='PSF of negative trace')
+
+        ax.legend()
+        ax.set_xlabel('y index')
+        ax.set_ylabel('normalized flux')
+        plt.savefig(self.writepath.replace('SPEC1D', 'PLOTS/') + 'negPSF-order' + str(
+            self.onum) + '.png')
+
 
         # Iterate over wavelength direction
         for i in np.arange(sh):
@@ -1089,30 +1383,29 @@ class Spec1D():
         object = object.replace(' ', '')
 
         # Plot positive flux with initial wavelength guess
-        plt.plot(self.wave_pos, flux_pos, drawstyle ='steps-mid',label='Pos flux w/ initial wavelength fit')
-        plt.plot(self.wave_pos, sky_pos, drawstyle='steps-mid', label='Pos sky w/ initial wavelength fit')
-        plt.legend(loc='upper left')
+        fig, ax = plt.subplots()
+        ax.plot(self.wave_pos, flux_pos, drawstyle ='steps-mid',label='Pos flux w/ initial wavelength fit')
+        ax.plot(self.wave_pos, sky_pos, drawstyle='steps-mid', label='Pos sky w/ initial wavelength fit')
+        ax.legend(loc='upper left')
         filename = self.writepath + '/' + object + '_' + date + '_' + time + '_spec1d' + str(self.onum) + '_pos' + '.png'
-        print (filename)
         plt.savefig(filename)
         plt.close()
 
-        plt.plot(self.wave_neg, flux_neg, drawstyle='steps-mid', label='Neg flux w/ initial wavelength fit')
-        plt.plot(self.wave_neg, sky_neg, drawstyle='steps-mid', label='Neg sky w/ initial wavelength fit')
-        plt.legend(loc='upper left')
+        fig, ax = plt.subplots()
+        ax.plot(self.wave_neg, flux_neg, drawstyle='steps-mid', label='Neg flux w/ initial wavelength fit')
+        ax.plot(self.wave_neg, sky_neg, drawstyle='steps-mid', label='Neg sky w/ initial wavelength fit')
+        ax.legend(loc='upper left')
         filename = self.writepath + '/' + object + '_' + date + '_' + time + '_spec1d' + str(
             self.onum) + '_neg' + '.png'
-        print (filename)
+        #print (filename)
         plt.savefig(filename)
         plt.close()
 
         # Why is sky_pos_cont subtracted??? why is nothing subtracted for flux_pos?
         return flux_pos,uflux_pos,flux_neg,uflux_neg,sky_pos-sky_pos_cont,sky_neg-sky_neg_cont,usky_pos,usky_neg
 
-    #
     def _fitCont(self,wave,spec):
         bg_temp = 210. #K
-        
         niter = 2
 
         cont = self.bb(wave*1e-6,bg_temp)
@@ -1121,8 +1414,8 @@ class Spec1D():
         gsubs = np.where(np.isfinite(spec))
         for i in range(niter):
             norm = np.median(spec[gsubs])
-            print ('norm')
-            print (norm)
+            # print ('norm')
+            # print (norm)
             norm_cont = np.median(cont[gsubs])
             # normalize by specific intensity from a BB continuum?
             cont *= norm/norm_cont
@@ -1277,7 +1570,7 @@ class Spec1D():
             filename = path+'/'+object+'_'+date+'_'+time+'_spec1d'+str(self.onum)+'.fits'
 
         
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -1290,20 +1583,33 @@ class WaveCal():
         self.WavePos = rfm.Optimize(specfile,alt=4.145,rpower=29000.,beam='pos',cull=2,am=am)
         self.WaveNeg = rfm.Optimize(specfile,alt=4.145,rpower=29000.,beam='neg',cull=2,am=am) 
         self.file = self._updateWave(specfile,self.WavePos,self.WaveNeg)
-        self.plotWaveFit(hp)
+        #self.plotWaveFit(hp)
         
     def _updateWave(self,specfile,WavePos,WaveNeg):
         spec1d = pf.open(specfile)
         spec1d[1].data.field('wave_pos')[:] = self.WavePos.getWave()
         spec1d[1].data.field('wave_neg')[:] = self.WaveNeg.getWave()
-        
-        oldpath,filename = os.path.split(specfile)
+        oldpath, filename = os.path.split(specfile)
         length = len(filename)
-        onum = filename[length-6]
-        filename = filename[0:length-12]
-        filename = filename+'wave'+onum+'.fits'
-        fullpath = self.path+'/'+filename
-        spec1d.writeto(fullpath,clobber=True)
+        onum = filename[length - 6]
+        filename = filename[0:length - 12]
+        filename = filename + 'wave' + onum + '.fits'
+        fullpath = self.path + '/' + filename
+        spec1d.writeto(fullpath, overwrite=True)
+
+        spec1d_ini_wfit_pos = self.WavePos.getModel()
+        fig, ax = plt.subplots()
+        ax.plot(spec1d_ini_wfit_pos['wave'], spec1d_ini_wfit_pos['flux'], label='pos flux')
+        ax.plot(spec1d_ini_wfit_pos['wave'], spec1d_ini_wfit_pos['Radiance'], label='pos rad')
+        ax.legend(loc='upper left')
+        plt.savefig(self.path + '/wavePos' + onum + '.png')
+
+        spec1d_ini_wfit_neg = self.WaveNeg.getModel()
+        fig, ax = plt.subplots()
+        ax.plot(spec1d_ini_wfit_neg['wave'], spec1d_ini_wfit_neg['flux'], label='neg flux')
+        ax.plot(spec1d_ini_wfit_neg['wave'], spec1d_ini_wfit_neg['Radiance'], label='neg rad')
+        ax.legend(loc='upper left')
+        plt.savefig(self.path + '/aveNeg' + onum + '.png')
         
         return fullpath
         
@@ -1321,8 +1627,12 @@ class WaveCal():
         plt.legend(loc='upper left')
         if (hp == True):
             plt.show()
-        else:
-            plt.show(block=False)
+        #else:
+            #plt.show(block=False)
+            # oldpath,filename = os.path.split(self.specfile)
+            # length = len(filename)
+            # onum = filename[length-6]
+            # plt.savefig(self.path + 'wavePosModel'+onum+'.png')
 
         trans = self.WaveNeg.getModel()
         plt.figure(self.specfile+' (Neg)')
@@ -1331,8 +1641,12 @@ class WaveCal():
         plt.legend(loc='upper left')
         if (hp == True):
             plt.show()
-        else:
-            plt.show(block=False)
+        #else:
+            # plt.show(block=False)
+            # oldpath, filename = os.path.split(self.specfile)
+            # length = len(filename)
+            # onum = filename[length - 6]
+            # plt.savefig(self.path + 'waveNegModel' + onum + '.png')
 
 class CalSpec():
     def __init__(self,scifile,stdfile,shift=0.,dtau=0.0,dowave=True,write_path=None,order=0):
@@ -1439,7 +1753,7 @@ class CalSpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_calspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -1502,7 +1816,7 @@ class SASpec():
             basename = getBaseName(self.header)
             filename = path+'/'+basename+'_saspec'+str(order)+'.fits'
 
-        thdulist.writeto(filename,clobber=True)
+        thdulist.writeto(filename,overwrite=True)
 
         return filename
 
@@ -1527,7 +1841,7 @@ class Reduction():
     def __init__(self,flat_range=None, flat_dark_range=None, dark_range=None,
                  sci_range=None, std_range=None, path=None, output_path = None, base=None,level1=True,level2=True,
                  shift=0.0, dtau=0.0, save_dark=True, save_flat=True, SettingsFile=None,
-                 ut_date = None, sci_tname=None, std_tname=None, hold_plots=True, hold=True, **kwargs):
+                 ut_date = None, sci_tname=None, target_type='bright', std_tname=None, hold_plots=True, hold=True, incont_fnum = False, **kwargs):
 
         if (hold == False):
             hold_plots = False
@@ -1542,8 +1856,8 @@ class Reduction():
 
         # Range of science images
         sci_range1 = sci_range
+        self.targetType = target_type
 
-        # ???
         self.shift = shift
         self.dtau = dtau
 
@@ -1557,6 +1871,9 @@ class Reduction():
             os.mkdir(out_dir)
 
         self.out_dir = out_dir
+
+        print ('output directory for target')
+        print (out_dir)
 
         self.level1_path = out_dir+'L1FILES'
         self.spec2d_path = out_dir+'SPEC2D'
@@ -1580,10 +1897,11 @@ class Reduction():
         self.flat_dark_names = makeFilelist(base,flat_dark_range,path=path)
         self.obs_dark_names  = makeFilelist(base,dark_range,path=path)
         self.flat_names = makeFilelist(base,flat_range,path=path)
-        self.sci_names1 = makeFilelist(base,sci_range1,path=path)
+        self.sci_names1 = makeFilelist(base,sci_range1,path=path,incontinuous_fnum=incont_fnum)
         self.std_names = makeFilelist(base,std_range,path=path)
 
-        # ???
+        print self.sci_names1
+
         self.mode  = 'SciStd'
 
         # Dict for the data files
@@ -1606,14 +1924,13 @@ class Reduction():
     def _level1(self):
 
         # Create flat dark
-        FDark = Dark(self.flat_dark_names,sci_tname=self.sci_tname,out_dir=self.out_dir)
+        FDark = Dark(self.flat_dark_names,save=self.save_dark,sci_tname=self.sci_tname,out_dir=self.out_dir)
         # Create observation dark
-        ODark = Dark(self.obs_dark_names,save=self.save_dark,sci_tname=self.sci_tname,out_dir=self.out_dir)
+        ODark = Dark(self.obs_dark_names,sci_tname=self.sci_tname,out_dir=self.out_dir)
         # Create flats
         OFlat = Flat(self.flat_names, dark=FDark,save=self.save_flat, SettingsFile=self.SettingsFile,sci_tname=self.sci_tname,out_dir=self.out_dir)
 
         img_flat = self.save_flat
-
         # Initialize dictionary for level1 files
         level1_files = {}
         #print (self.tdict)
@@ -1632,15 +1949,19 @@ class Reduction():
             for i in np.arange(norders):
                 print '### Processing order',i+1
                 # Shift A-B images, combine them, and rectify combined A-B image
-                OOrder   = Order(ONod,onum=i+1,write_path=self.spec2d_path)
+                OOrder   = Order(ONod,onum=i+1,write_path=self.spec2d_path, targetType=self.targetType)
                 print '### 2D order extracted'
-                #
+
                 OSpec1D  = Spec1D(OOrder,sa=True,write_path=self.spec1d_path)
 
-                # Omit -- we will do wavelength calibration differently
-                # OWaveCal = WaveCal(OSpec1D.file,path=self.wave_path,am=OSpec1D.airmass, hp=self.hold_plots)
-                OOrder_files = {'2d':OOrder.file} #,'1d':OSpec1D.file, 'wave':OWaveCal.file}
-                target_files.append(OOrder_files)
+                # Only need to do WAVECAL for star, not faint companions
+                if self.targetType == 'faint':
+                    OOrder_files = {'2d': OOrder.file, '1d': OSpec1D.file}
+                    target_files.append(OOrder_files)
+                else:
+                    OWaveCal = WaveCal(OSpec1D.file, path=self.wave_path, am=OSpec1D.airmass, hp=self.hold_plots)
+                    OOrder_files = {'2d': OOrder.file, '1d': OSpec1D.file, 'wave': OWaveCal.file}
+                    target_files.append(OOrder_files)
 
             level1_files[key] = target_files
 
@@ -1679,16 +2000,25 @@ def readFilelist(listfile):
     return flist
 
 ## Create a list of file names for a specific file type (flats, darks etc.)
-def makeFilelist(date,ranges,path=''):
+def makeFilelist(date,ranges,path='', incontinuous_fnum = False):
 
-    if not isinstance(ranges,list):
-        ranges = [ranges]
+    # If the list of file numbers are not continuous (e.g.: 193, 194, 197, 198)
+    if not incontinuous_fnum:
 
-    fnames = []
-    for Range in ranges:
-        fnumbers = np.arange(Range[0], Range[1]+1, 1)
+        if not isinstance(ranges,list):
+            ranges = [ranges]
+
+        fnames = []
+        for Range in ranges:
+            fnumbers = np.arange(Range[0], Range[1]+1, 1)
+            for number in fnumbers:
+                fnames.append(path+date+'s'+str(number).zfill(4)+'.fits')
+
+    else:
+        fnames = []
+        fnumbers = ranges[0]
         for number in fnumbers:
-            fnames.append(path+date+'s'+str(number).zfill(4)+'.fits')
+            fnames.append(path + date + 's' + str(number).zfill(4) + '.fits')
 
     return fnames
 
@@ -1723,4 +2053,4 @@ def calc_centroid(cc,cwidth=15):
 
 def write_fits(array,filename='test.fits'):
     hdu = pf.PrimaryHDU(array)
-    hdu.writeto(filename,clobber=True)
+    hdu.writeto(filename,overwrite=True)
