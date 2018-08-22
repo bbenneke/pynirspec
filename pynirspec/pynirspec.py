@@ -729,8 +729,8 @@ class Order():
             fitMethod = 'FFT'
         # Fit polynomial to rectify A-B image
         if trace is None:
-            yr1, trace1 = self.fitTrace(self.image1, 1, tunekWidth=False, fitMethod=fitMethod)
-            yr2, trace2 = self.fitTrace(self.image2, 2, tunekWidth=False, fitMethod=fitMethod)
+            yr1, trace1 = self.fitTrace(self.image1, 1, fitMethod=fitMethod)
+            yr2, trace2 = self.fitTrace(self.image2, 2, fitMethod=fitMethod)
             yrs, traces  = [yr1, yr2], [trace1, trace2]
   
         images, uimages = [self.image1, self.image2], [self.uimage1, self.uimage2]
