@@ -935,7 +935,7 @@ class Order():
 
         centroids = np.array(centroids)
         totals = np.array(totals)
-        median_totals = np.median(totals)
+        median_totals = np.nanmedian(totals)
 
         xindex = np.arange(sh[1])
         gsubs = np.where((np.isnan(centroids) == False) & (totals > median_totals * 0.25) & (totals < median_totals * 1.75))
